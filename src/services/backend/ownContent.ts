@@ -1,5 +1,7 @@
 /**
  * Phase 6D: edit and delete what you posted (REAL accounts).
+ * App Review patch: in the Demo, Buzz you posted on this phone can be edited
+ * and deleted too (locally; the Demo never talks to the server).
  *
  * The server enforces every rule (author only; edits within 1 hour of the
  * server's created_at; delete any time). The app shows the change on every
@@ -7,6 +9,7 @@
  * cache matches the server.
  */
 import { inferInterestsFromText } from '@/utils/inferInterests';
+import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
 import { useSession } from '@/store/useSession';
 import { deleteBuzz, deleteComment, deleteWorld, editBuzz, editComment } from './content';
@@ -15,7 +18,17 @@ import * as realData from './realData';
 
 const resync = () => void useSession.getState().refresh();
 
+/** Demo: a Buzz you posted on this phone (only those can be edited or deleted). */
+export function isMyDemoBuzz(id: string): boolean {
+  return repo.mode() === 'demo' && (useChimp.getState().created?.buzz ?? []).some((b) => b.id === id);
+}
+
 export async function saveBuzzEdit(id: string, body: string, boardId: string): Promise<void> {
+  if (isMyDemoBuzz(id)) {
+    const created = useChimp.getState().created;
+    useChimp.setState({ created: { ...created, buzz: created.buzz.map((b) => (b.id === id ? { ...b, body, boardId, editedAtMs: Date.now() } : b)) } });
+    return;
+  }
   const row = await editBuzz(id, body, boardId);
   const text = [row.title, row.body, row.meme_text, row.poll?.question].filter(Boolean).join(' ');
   realData.patchBuzz(id, {
@@ -35,8 +48,14 @@ function without<T>(m: Record<string, T>, id: string): Record<string, T> {
 }
 
 export async function removeMyBuzz(id: string): Promise<void> {
-  await deleteBuzz(id);
-  realData.removeBuzz(id);
+  const demo = isMyDemoBuzz(id);
+  if (demo) {
+    const created = useChimp.getState().created;
+    useChimp.setState({ created: { ...created, buzz: created.buzz.filter((b) => b.id !== id) } });
+  } else {
+    await deleteBuzz(id);
+    realData.removeBuzz(id);
+  }
   // Your own flags on it (the server already removed the rows).
   useChimp.setState((s) => ({
     buzzLikes: without(s.buzzLikes, id),
@@ -45,7 +64,7 @@ export async function removeMyBuzz(id: string): Promise<void> {
     buzzReposts: without(s.buzzReposts, id),
     buzzVotes: without(s.buzzVotes, id),
   }));
-  resync();
+  if (!demo) resync();
 }
 
 export async function saveReplyEdit(id: string, body: string): Promise<CommentRow> {

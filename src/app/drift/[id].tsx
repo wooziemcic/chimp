@@ -2,11 +2,12 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
 import { Bookmark, ChevronRight, GalleryHorizontal, Heart, MessageCircle, Play, Share2, X } from 'lucide-react-native';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, Share, StyleSheet, useWindowDimensions, View, ViewToken } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { duration } from '@/components/drift/DriftTile';
+import { ChimpVideo } from '@/components/media/ChimpVideo';
 import { Avatar } from '@/components/ui/Avatar';
 import { Img } from '@/components/ui/Img';
 import { EmptyState } from '@/components/ui/misc';
@@ -23,7 +24,8 @@ import { compact } from '@/utils/format';
 /**
  * Full-screen Drift: swipe up for the next thing. The order is frozen when
  * you open it (ranking changes as you like things, the pager doesn't jump).
- * Video is a still preview in the prototype.
+ * Video is a still preview in the prototype, except the Demo's bundled clip
+ * (App Review patch), which plays while it's on screen.
  */
 /** How long an item must stay on screen to count as watched. */
 const WATCH_DWELL_MS = 1500;
@@ -44,6 +46,7 @@ export default function DriftViewer() {
   const startIndex = Math.max(0, queue.findIndex((d) => d.id === id));
 
   const watchDrift = useChimp((s) => s.watchDrift);
+  const [activeId, setActiveId] = useState(id);
   // Phase 5: staying on an item for a moment counts as watching it (once per
   // item, +0.03 to its interests). Scrolling past doesn't.
   const dwell = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -57,10 +60,11 @@ export default function DriftViewer() {
       const v = viewableItems[0]?.item as DriftItem | undefined;
       if (dwell.current) clearTimeout(dwell.current);
       if (!v) return;
+      setActiveId(v.id);
       markSeen({ kind: 'drift', id: v.id });
       dwell.current = setTimeout(() => watchDrift(v.id), WATCH_DWELL_MS);
     },
-    [markSeen, watchDrift],
+    [markSeen, watchDrift, setActiveId],
   );
 
   const getItemLayout = useCallback((_: unknown, index: number) => ({ length: height, offset: height * index, index }), [height]);
@@ -80,14 +84,16 @@ export default function DriftViewer() {
         onViewableItemsChanged={onViewable}
         viewabilityConfig={{ itemVisiblePercentThreshold: 70 }}
         windowSize={3}
-        renderItem={({ item }) => <DriftPage item={item} width={width} height={height} />}
+        extraData={activeId}
+        renderItem={({ item }) => <DriftPage item={item} width={width} height={height} active={item.id === activeId} />}
       />
     </View>
   );
 }
 
-function DriftPage({ item, width, height }: { item: DriftItem; width: number; height: number }) {
+function DriftPage({ item, width, height, active }: { item: DriftItem; width: number; height: number; active: boolean }) {
   const insets = useSafeAreaInsets();
+  const [muted, setMuted] = useState(true);
   const liked = useChimp((s) => !!s.driftLikes[item.id]);
   const saved = useChimp((s) => !!s.driftSaves[item.id]);
   const toggleLike = useChimp((s) => s.toggleDriftLike);
@@ -98,10 +104,14 @@ function DriftPage({ item, width, height }: { item: DriftItem; width: number; he
 
   return (
     <View style={{ width, height }}>
-      <Img uri={item.image} tint="#111" style={StyleSheet.absoluteFill} />
-      <LinearGradient colors={['rgba(0,0,0,0.45)', 'rgba(0,0,0,0)', 'rgba(0,0,0,0)', 'rgba(0,0,0,0.8)']} locations={[0, 0.2, 0.55, 1]} style={StyleSheet.absoluteFill} />
+      {item.clipSource ? (
+        <ChimpVideo uri={item.clipSource} poster={item.image} active={active} muted={muted} onToggleMute={() => setMuted((m) => !m)} contentFit="cover" style={StyleSheet.absoluteFill} muteStyle={{ top: insets.top + 56, right: 14 }} />
+      ) : (
+        <Img uri={item.image} tint="#111" style={StyleSheet.absoluteFill} />
+      )}
+      <LinearGradient pointerEvents="none" colors={['rgba(0,0,0,0.45)', 'rgba(0,0,0,0)', 'rgba(0,0,0,0)', 'rgba(0,0,0,0.8)']} locations={[0, 0.2, 0.55, 1]} style={StyleSheet.absoluteFill} />
 
-      {item.kind === 'video' ? (
+      {item.kind === 'video' && !item.clipSource ? (
         <View style={styles.play} pointerEvents="none">
           <Play size={30} color={colors.white} fill={colors.white} />
           <T v="caption" color={colors.white} weight="700" style={{ marginTop: 6 }}>

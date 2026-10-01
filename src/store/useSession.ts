@@ -32,6 +32,8 @@ export type SessionStatus = 'booting' | 'signedOut' | 'onboarding' | 'switching'
 export type OnboardingStep = 'profile-setup' | 'phrase' | 'interests' | 'open-to';
 
 const MODE_KEY = 'chimp-account';
+/** App Review Demo: the Demo opened from Welcome without signing in (see enterReviewDemo). */
+const REVIEW_KEY = 'chimp-review-demo';
 const DEMO_BUCKET = 'chimp-store';
 const realBucket = (uid: string) => `chimp-store:real:${uid}`;
 
@@ -47,6 +49,12 @@ interface SessionState {
    * UI visibility only; the server enforces everything it protects.
    */
   developer: boolean;
+  /**
+   * App Review Demo: the seeded Demo opened from Welcome, with no account at
+   * all (for Apple's reviewers). A banner offers "Exit App Review Demo", which
+   * goes back to Welcome. Never a developer; never touches Supabase.
+   */
+  reviewDemo: boolean;
   profile: ProfileRow | null;
   /** Last load/sync problem, shown quietly (never blocks the app). */
   error?: string;
@@ -61,6 +69,10 @@ interface SessionState {
   /** Phase 6C: only the real like totals (Trending), cheap enough to repeat. */
   refreshLikes: () => Promise<void>;
   enterDemo: () => Promise<void>;
+  /** From Welcome (signed out): the seeded Demo, fresh, no sign-in, no Supabase user. */
+  enterReviewDemo: () => Promise<void>;
+  /** Leave the App Review Demo → Welcome. */
+  exitReviewDemo: () => Promise<void>;
   signOut: () => Promise<void>;
   /**
    * Phase 6D: permanently delete the signed-in REAL account (server-side),
@@ -198,6 +210,30 @@ export const useSession = create<SessionState>((set, get) => {
     }
   };
 
+  /**
+   * Enter the seeded Demo. `fresh` (App Review Demo) starts it from the seeded
+   * state, so every reviewer sees the same world.
+   */
+  const enterDemoWith = (fresh: boolean) => {
+    const swap = async () => {
+      // Leaving REAL: its session stays (a later sign-in is instant) but nothing of it stays in memory.
+      realData.stopReal();
+      setDataset(emptyDataset());
+      await switchBucket(DEMO_BUCKET, () => ({}));
+      if (fresh) useChimp.getState().resetDemo();
+      publishDemo(); // the DEMO dataset, complete, before any screen mounts
+      unsubDemo?.();
+      unsubDemo = useChimp.subscribe((s, prev) => {
+        if (s.created !== prev.created || s.profile.phrase !== prev.profile.phrase || s.profile.emoji !== prev.profile.emoji) publishDemo();
+      });
+      await AsyncStorage.setItem(MODE_KEY, 'demo');
+      set({ status: 'ready', mode: 'demo', uid: undefined, email: undefined, profile: null });
+      startupMark('Buzz ready (Demo)');
+    };
+    // At launch nothing is mounted: no transition screen needed (Phase 6C).
+    return get().status === 'booting' ? swap() : transition('enter DEMO', swap);
+  };
+
   /** Ask the server whether this account is a developer (never decided on the phone). */
   const loadAccess = async (uid: string) => {
     const { developer } = await fetchAccess();
@@ -208,6 +244,7 @@ export const useSession = create<SessionState>((set, get) => {
     status: 'booting',
     mode: null,
     developer: false,
+    reviewDemo: false,
     profile: null,
     syncing: false,
 
@@ -225,7 +262,11 @@ export const useSession = create<SessionState>((set, get) => {
         });
       }
       const mode = (await AsyncStorage.getItem(MODE_KEY)) as AccountMode | null;
-      if (mode === 'demo') return get().enterDemo();
+      if (mode === 'demo') {
+        // Relaunching inside the App Review Demo keeps its banner (and its way out).
+        if ((await AsyncStorage.getItem(REVIEW_KEY)) === '1') set({ reviewDemo: true, developer: false });
+        return get().enterDemo();
+      }
       if (!isBackendConfigured) return set({ status: 'signedOut', mode: null });
       try {
         const u = await currentUserId();
@@ -334,27 +375,24 @@ export const useSession = create<SessionState>((set, get) => {
       realData.applyLikeTotals(totals, (kind, id) => (kind === 'buzz' ? !!s.buzzLikes[id] : !!s.driftLikes[id]));
     },
 
-    enterDemo: () => {
-      const swap = async () => {
-        // Leaving REAL: its session stays (a later sign-in is instant) but nothing of it stays in memory.
-        realData.stopReal();
-        setDataset(emptyDataset());
-        await switchBucket(DEMO_BUCKET, () => ({}));
-        publishDemo(); // the DEMO dataset, complete, before any screen mounts
-        unsubDemo?.();
-        unsubDemo = useChimp.subscribe((s, prev) => {
-          if (s.created !== prev.created || s.profile.phrase !== prev.profile.phrase || s.profile.emoji !== prev.profile.emoji) publishDemo();
-        });
-        await AsyncStorage.setItem(MODE_KEY, 'demo');
-        set({ status: 'ready', mode: 'demo', uid: undefined, email: undefined, profile: null });
-        startupMark('Buzz ready (Demo)');
-      };
-      // At launch nothing is mounted: no transition screen needed (Phase 6C).
-      return get().status === 'booting' ? swap() : transition('enter DEMO', swap);
+    enterDemo: () => enterDemoWith(false),
+
+    enterReviewDemo: async () => {
+      // Only from Welcome: nobody is signed in, so there's no account to be a developer of.
+      if (get().status !== 'signedOut') return;
+      await AsyncStorage.setItem(REVIEW_KEY, '1');
+      set({ reviewDemo: true, developer: false });
+      await enterDemoWith(true);
+    },
+
+    exitReviewDemo: async () => {
+      if (!get().reviewDemo) return;
+      await get().signOut();
     },
 
     signOut: async () => {
       const leavingDemo = get().mode === 'demo';
+      const leavingReview = get().reviewDemo;
       await transition(leavingDemo ? 'leave DEMO' : 'sign out', async () => {
         unsubDemo?.();
         unsubDemo = null;
@@ -367,15 +405,17 @@ export const useSession = create<SessionState>((set, get) => {
         }
         realData.stopReal();
         await AsyncStorage.removeItem(MODE_KEY);
+        await AsyncStorage.removeItem(REVIEW_KEY);
         // Park the local store on the demo bucket with the matching dataset; nothing real stays in memory.
         setDataset(emptyDataset());
         await switchBucket(DEMO_BUCKET, () => ({}));
         setDataset(demoDataset(useChimp.getState().created ?? emptyCreations()));
-        set({ status: 'signedOut', mode: null, uid: undefined, email: undefined, developer: false, profile: null, error: undefined });
+        set({ status: 'signedOut', mode: null, uid: undefined, email: undefined, developer: false, reviewDemo: false, profile: null, error: undefined });
       });
       // Phase 6D: the developer opens Demo from their own account without signing
       // out, so leaving Demo goes back to that account when its session is still here.
-      if (leavingDemo && isBackendConfigured) {
+      // (The App Review Demo always goes back to Welcome.)
+      if (leavingDemo && !leavingReview && isBackendConfigured) {
         const u = await currentUserId().catch(() => null);
         if (u) await get().signedIn(u.id, u.email);
       }

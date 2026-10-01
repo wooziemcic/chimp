@@ -120,7 +120,7 @@ const DriftEntryPage = memo(function DriftEntryPage({
   const notForMe = () => (isBuzz ? toggleBuzzDislike(entry.id) : toggleDriftDislike(entry.id));
   const comment = () => pushOnce(isBuzz ? `/buzz/${entry.id}` : `/comments/drift:${entry.id}`);
   const share = () => void Share.share({ message: `${entry.caption ? `${entry.caption} · ` : ''}${board ? `${board.title} on Chimp` : 'on Chimp'}` });
-  const open = () => openMedia(entry.images, entry.aspects, 0, { caption: entry.caption, authorName: author?.displayName, context: board?.title });
+  const open = () => openMedia(entry.images.filter((x): x is string => typeof x === 'string'), entry.aspects, 0, { caption: entry.caption, authorName: author?.displayName, context: board?.title });
 
   return (
     <View style={{ width, height, backgroundColor: '#000' }} accessibilityLabel={`${author?.displayName ?? 'Someone'}: ${entry.caption || (clip ? 'video' : 'photo')}`}>

@@ -7,7 +7,7 @@ import { Composer, Input, WorldPicker, closeComposer } from '@/components/create
 import { Img } from '@/components/ui/Img';
 import { EmptyState } from '@/components/ui/misc';
 import { T } from '@/components/ui/Text';
-import { saveBuzzEdit } from '@/services/backend/ownContent';
+import { isMyDemoBuzz, saveBuzzEdit } from '@/services/backend/ownContent';
 import { repo } from '@/services/repository';
 import { colors, radius } from '@/theme';
 
@@ -27,7 +27,7 @@ export default function EditBuzz() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (!item || repo.mode() !== 'real' || !repo.isMe(item.authorId)) return <EmptyState title="Nothing to edit" body="You can only edit your own posts." />;
+  if (!item || !((repo.mode() === 'real' && repo.isMe(item.authorId)) || isMyDemoBuzz(item.id))) return <EmptyState title="Nothing to edit" body="You can only edit your own posts." />;
 
   const media = item.video?.poster ?? item.image;
   const text = body.trim();

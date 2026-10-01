@@ -820,3 +820,13 @@ Group chats, reactions + Same Brain, Mutual Ping, Open Loops and Group Chemistry
   - Messages can now only be unsent (not rewritten or moved).
   - Realtime DELETE events no longer reveal who was in which chat.
 
+## TestFlight App Review access patch
+
+Apple's reviewer couldn't get past email sign-in (Guideline 2.1(a)). Welcome now has a small **App Review Demo** action under **Continue with Email**. It opens the seeded Demo with no sign-in and no Supabase user, and without developer tools. **Exit App Review Demo** (a banner on every screen, and in Settings) returns to Welcome.
+
+- Normal sign-in is unchanged.
+- No secrets in the app, no RLS changes, no migration.
+- The Demo also gained edit/delete for your own Demo posts and one bundled 8-second clip that really plays in Drift.
+
+Details, the App Store Connect review note and the iPhone checks are in `BUILD_NOTES.md`.
+

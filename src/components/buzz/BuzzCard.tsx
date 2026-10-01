@@ -12,7 +12,7 @@ import { OwnerMenu } from '@/components/ui/OwnerMenu';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { CATEGORIES } from '@/data/interests';
-import { removeMyBuzz } from '@/services/backend/ownContent';
+import { isMyDemoBuzz, removeMyBuzz } from '@/services/backend/ownContent';
 import { useDatasetVersion } from '@/services/dataset';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
@@ -119,12 +119,17 @@ function when(item: BuzzItem) {
   return item.editedAtMs ? `${at} · Edited` : at;
 }
 
+/** Your own REAL post, or (Demo) a Buzz you posted on this phone. */
+function canManage(item: BuzzItem) {
+  return (repo.mode() === 'real' && repo.isMe(item.authorId)) || isMyDemoBuzz(item.id);
+}
+
 /**
  * Phase 6D: ••• on your own REAL post: Edit (1 hour; not polls) and Delete.
  * On the detail screen a deleted post also closes the screen.
  */
 function PostOwnerMenu({ item, expanded, onDark }: { item: BuzzItem; expanded?: boolean; onDark?: boolean }) {
-  if (repo.mode() !== 'real' || !repo.isMe(item.authorId)) return null;
+  if (!canManage(item)) return null;
   return (
     <OwnerMenu
       what="post"
@@ -187,7 +192,7 @@ function Byline({ item, expanded }: { item: BuzzItem; expanded?: boolean }) {
         {when(item)}
       </T>
       <WorldChip boardId={item.boardId} authorId={item.authorId} />
-      {repo.mode() === 'real' && repo.isMe(item.authorId) ? (
+      {canManage(item) ? (
         <View style={{ marginLeft: 'auto' }}>
           <PostOwnerMenu item={item} expanded={expanded} />
         </View>

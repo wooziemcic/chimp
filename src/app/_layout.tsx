@@ -5,6 +5,7 @@ import { useEffect } from 'react';
 import { ActivityIndicator, AppState, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
+import { AppReviewFrame } from '@/components/AppReviewBanner';
 import { AUTH_BG } from '@/components/auth/palette';
 import { MediaViewer } from '@/components/media/MediaViewer';
 import { T } from '@/components/ui/Text';
@@ -30,6 +31,8 @@ export default function RootLayout() {
   const hydrated = useChimp((s) => s.hydrated);
   const status = useSession((s) => s.status);
   const appReady = status === 'ready';
+  // App Review Demo: a banner with "Exit App Review Demo" above every screen.
+  const reviewDemo = useSession((s) => s.reviewDemo && s.mode === 'demo');
   const ready = (fontsLoaded || !!fontError) && hydrated && status !== 'booting';
 
   // Phase 6A: decide DEMO vs REAL, restore the Supabase session.
@@ -91,6 +94,7 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.bg }}>
       <ThemeProvider value={navTheme}>
+        <AppReviewFrame active={reviewDemo && appReady}>
         <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.bg } }}>
           {/* Phase 6A gate: `/` routes by session status (see app/index.tsx). */}
           <Stack.Screen name="index" />
@@ -140,6 +144,7 @@ export default function RootLayout() {
         </Stack>
         {/* Phase 6B: one global media viewer (a modal, not a route). */}
         {appReady ? <MediaViewer /> : null}
+        </AppReviewFrame>
       </ThemeProvider>
     </GestureHandlerRootView>
   );

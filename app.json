@@ -10,7 +10,10 @@
     "backgroundColor": "#F5F7FB",
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.aayushmallik.chimp"
+      "bundleIdentifier": "com.aayushmallik.chimp",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.chimp.app",

@@ -36,6 +36,9 @@ export default function SettingsScreen() {
   const developer = useSession((s) => s.developer);
   const signOut = useSession((s) => s.signOut);
   const enterDemo = useSession((s) => s.enterDemo);
+  // App Review Demo (from Welcome, no account): no developer tools; leaving goes to Welcome.
+  const review = useSession((s) => s.reviewDemo);
+  const exitReview = useSession((s) => s.exitReviewDemo);
   const demo = mode === 'demo';
   const contexts = [
     { id: 'default', title: 'Everywhere by default', allowed: ['public', 'pseudonymous'] as IdentityMode[] },
@@ -119,9 +122,9 @@ export default function SettingsScreen() {
           <View style={styles.option}>
             <ShieldCheck size={18} color={colors.accent} />
             <View style={{ flex: 1, marginLeft: 12 }}>
-              <T v="bodyStrong">{demo ? 'Demo account (WollyMc)' : `@${repo.me().username}`}</T>
+              <T v="bodyStrong">{review ? 'App Review Demo (WollyMc)' : demo ? 'Demo account (WollyMc)' : `@${repo.me().username}`}</T>
               <T v="footnote" color={colors.inkMuted} weight="400">
-                {demo ? 'Seeded test world. Nothing here is real or shared.' : developer ? 'Developer account' : 'Your Chimp account'}
+                {review ? 'A sample account with demo data. No sign-in; nothing here is real or shared.' : demo ? 'Seeded test world. Nothing here is real or shared.' : developer ? 'Developer account' : 'Your Chimp account'}
               </T>
             </View>
           </View>
@@ -144,12 +147,21 @@ export default function SettingsScreen() {
               </T>
             </Tap>
           ) : null}
-          <Tap onPress={() => void signOut()} style={styles.option} accessibilityLabel={demo ? 'Leave Demo' : 'Sign out'}>
-            <LogOut size={18} color={colors.ink2} />
-            <T v="bodyStrong" style={{ marginLeft: 12 }}>
-              {demo ? 'Leave the Demo account' : 'Sign out'}
-            </T>
-          </Tap>
+          {review ? (
+            <Tap onPress={() => void exitReview()} style={styles.option} accessibilityLabel="Exit App Review Demo (settings)">
+              <LogOut size={18} color={colors.ink2} />
+              <T v="bodyStrong" style={{ marginLeft: 12 }}>
+                Exit App Review Demo
+              </T>
+            </Tap>
+          ) : (
+            <Tap onPress={() => void signOut()} style={styles.option} accessibilityLabel={demo ? 'Leave Demo' : 'Sign out'}>
+              <LogOut size={18} color={colors.ink2} />
+              <T v="bodyStrong" style={{ marginLeft: 12 }}>
+                {demo ? 'Leave the Demo account' : 'Sign out'}
+              </T>
+            </Tap>
+          )}
           {!demo ? (
             <Tap onPress={() => router.push('/delete-account')} style={styles.option} accessibilityLabel="Delete account" testID="settings-delete-account">
               <Trash2 size={18} color={colors.danger} />
@@ -165,7 +177,7 @@ export default function SettingsScreen() {
             </Tap>
           ) : null}
         </View>
-        {developer || demo ? (
+        {developer || (demo && !review) ? (
           <View style={styles.group} testID="settings-developer">
             <T v="label" color={colors.inkFaint} style={{ marginBottom: 8 }}>
               DEVELOPER

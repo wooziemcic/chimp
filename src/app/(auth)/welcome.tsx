@@ -3,17 +3,22 @@ import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { PrimaryButton, TextLink } from '@/components/auth/AuthUI';
+import { PrimaryButton } from '@/components/auth/AuthUI';
 import { ChimpWorld } from '@/components/auth/ChimpWorld';
 import { auth } from '@/components/auth/palette';
+import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import { isBackendConfigured } from '@/lib/supabase';
+import { resetDemoChat } from '@/services/demoChat';
 import { useSession } from '@/store/useSession';
 
-/** The first thing a new person sees: the Chimp looking out at a world of possibilities. */
+/**
+ * The first thing a new person sees: the Chimp looking out at a world of possibilities.
+ * One way in (Continue with Email). Below it, App Review Demo: the seeded Demo
+ * with no sign-in, so App Review can see everything (no account is created).
+ */
 export default function Welcome() {
   const { width, height } = useWindowDimensions();
-  const enterDemo = useSession((s) => s.enterDemo);
+  const enterReviewDemo = useSession((s) => s.enterReviewDemo);
   const artH = Math.round(height * 0.74);
   return (
     <View style={{ flex: 1, backgroundColor: auth.bg }}>
@@ -38,7 +43,19 @@ export default function Welcome() {
           {/* Phase 6D: one path for new and returning people (no Sign Up / Sign In choice). */}
           <PrimaryButton label="Continue with Email" onPress={() => router.push('/email')} />
           <T style={styles.foot}>Explore. Connect. Plan. Create.</T>
-          {!isBackendConfigured ? <TextLink label="Explore the Demo account" onPress={() => void enterDemo()} color={auth.faint} /> : null}
+          <Tap
+            onPress={() => {
+              resetDemoChat();
+              void enterReviewDemo();
+            }}
+            style={styles.review}
+            accessibilityLabel="App Review Demo"
+            accessibilityHint="Opens a sample account with demo data. No sign-in."
+            testID="app-review-demo"
+          >
+            <T style={styles.reviewLabel}>App Review Demo</T>
+            <T style={styles.reviewSub}>Sample account with demo data · no sign-in</T>
+          </Tap>
         </View>
       </SafeAreaView>
     </View>
@@ -51,4 +68,7 @@ const styles = StyleSheet.create({
   dot: { position: 'absolute', top: 6, left: 4, width: 20, height: 20, borderRadius: 10, backgroundColor: auth.coral, zIndex: 2 },
   tag: { color: '#E6E3F5', fontSize: 21, lineHeight: 28, marginTop: 6, fontWeight: '500' },
   foot: { color: auth.lilac, fontSize: 16, textAlign: 'center', marginTop: 18 },
+  review: { alignSelf: 'center', alignItems: 'center', marginTop: 10, paddingVertical: 8, paddingHorizontal: 16, borderRadius: 16 },
+  reviewLabel: { color: auth.cream, fontSize: 15, fontWeight: '700', textDecorationLine: 'underline' },
+  reviewSub: { color: auth.muted, fontSize: 12, marginTop: 2 },
 });

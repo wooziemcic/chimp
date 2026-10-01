@@ -15,7 +15,7 @@
 import { interestById } from '@/data/interests';
 import { ds } from '@/services/dataset';
 import { repo } from '@/services/repository';
-import type { Board, BuzzItem, DriftItem, EntityRef, HappeningItem, Post, Reason, Scored, Story } from '@/types/models';
+import type { Board, BuzzItem, DriftItem, EntityRef, HappeningItem, ImageSrc, Post, Reason, Scored, Story } from '@/types/models';
 
 import { HAPPENING, NEGATIVE, SURFACE_WEIGHTS, TRENDING } from './config';
 import { loopProgress } from './loops';
@@ -330,7 +330,7 @@ export interface FeedEntry {
   key: string;
   kind: 'drift' | 'buzz';
   id: string;
-  images: string[];
+  images: ImageSrc[];
   aspects?: number[];
   caption: string;
   authorId?: string;
@@ -341,7 +341,7 @@ export interface FeedEntry {
   video?: boolean;
   durationSec?: number;
   /** Phase 6C: a real clip (url) or, for Demo fixtures, just a poster. */
-  clip?: { url?: string; poster?: string; durationMs?: number; aspect?: number };
+  clip?: { url?: string | number; poster?: ImageSrc; durationMs?: number; aspect?: number };
   likeCount: number;
 }
 
@@ -398,7 +398,7 @@ export function buildDriftFeed(ctx: GraphContext, limit = 60): FeedEntry[] {
     score,
     video: d.kind === 'video',
     durationSec: d.durationSec,
-    clip: d.kind === 'video' ? { poster: d.image, durationMs: d.durationSec ? d.durationSec * 1000 : undefined } : undefined,
+    clip: d.kind === 'video' ? { url: d.clipSource, poster: d.image, durationMs: d.durationSec ? d.durationSec * 1000 : undefined } : undefined,
     likeCount: d.likeCount + (ctx.s.driftLikes[d.id] ? 1 : 0),
   }));
   const photos: FeedEntry[] = rankBuzz(ctx, 'forYou')

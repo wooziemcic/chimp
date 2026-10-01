@@ -781,12 +781,14 @@ export interface DriftItem {
   boardId: ID;
   /** The creator. */
   authorId: ID;
-  image: string;
+  image: ImageSrc;
   images?: string[];
   caption: string;
   memeText?: string;
   /** Video length (static preview in the prototype). */
   durationSec?: number;
+  /** App Review patch: a short clip bundled with the app, so the Demo has one video that really plays. */
+  clipSource?: number;
   likeCount: number;
   createdAt: string;
   ageHours: number;

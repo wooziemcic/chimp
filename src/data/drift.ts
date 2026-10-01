@@ -6,7 +6,12 @@
 import type { DriftItem } from '@/types/models';
 import { card } from './media';
 
+/** App Review patch: one short clip bundled with the app, so the Demo has a video that really plays. */
+const DEMO_CLIP = require('../../assets/demo/drift-demo.mp4') as number;
+const DEMO_CLIP_POSTER = require('../../assets/demo/drift-demo-poster.jpg') as number;
+
 export const DRIFT: DriftItem[] = [
+  { id: 'dr_demo_clip', kind: 'video', boardId: 'boston-founders', authorId: 'u_priya', image: DEMO_CLIP_POSTER, clipSource: DEMO_CLIP, caption: 'Eight seconds of Drift: short videos play right here.', durationSec: 8, likeCount: 6400, createdAt: '20m', ageHours: 0.3, tall: true },
   // Japan / Tokyo
   { id: 'dr_ninenzaka', kind: 'video', boardId: 'japan-trip', authorId: 'u_maya_t', image: card('kyotoStreet'), caption: 'Ninenzaka at 6:40am, before the crowds.', durationSec: 24, likeCount: 4200, createdAt: '2h', ageHours: 2, tall: true },
   { id: 'dr_fuji', kind: 'carousel', boardId: 'japan-trip', authorId: 'u_alex', image: card('fujiPagoda'), images: [card('fujiPagoda'), card('japanShrine'), card('kyotoTemple')], caption: 'Chureito Pagoda: three angles, one very early train.', likeCount: 3100, createdAt: '5h', ageHours: 5 },

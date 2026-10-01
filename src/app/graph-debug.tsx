@@ -48,7 +48,8 @@ import type { Scored } from "@/types/models";
  */
 /** Phase 6D: developer accounts (server-decided) and the Demo account only. */
 export default function GraphDebugScreen() {
-  const allowed = useSession((x) => x.developer || x.mode === "demo");
+  // App Review Demo: no developer tools (it is opened without any account).
+  const allowed = useSession((x) => x.developer || (x.mode === "demo" && !x.reviewDemo));
   if (!allowed)
     return (
       <SafeAreaView edges={["top"]} style={{ flex: 1, backgroundColor: colors.bg }}>

@@ -21,6 +21,7 @@ import { Img } from '@/components/ui/Img';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { colors } from '@/theme';
+import type { ImageSrc } from '@/types/models';
 
 /** The player is a native object with an imperative API; these keep its mutation in one place. */
 function applyPlayer(p: VideoPlayer, opts: { muted: boolean; loop: boolean }) {
@@ -38,8 +39,9 @@ export function formatDuration(ms?: number): string {
 }
 
 interface Props {
-  uri: string;
-  poster?: string;
+  /** A URL, or (App Review Demo) a clip bundled with the app (`require(...)`). */
+  uri: string | number;
+  poster?: ImageSrc;
   /** Only the active clip plays. */
   active: boolean;
   muted: boolean;

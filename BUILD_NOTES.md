@@ -1,3 +1,85 @@
+# Chimp build notes — TestFlight App Review access patch
+
+1 Oct 2026 · Apple rejected the first external TestFlight build under Guideline 2.1(a): the reviewer couldn't get into the app (sign-in needs a code sent to an email they don't have). This patch gives App Review a way in **without changing how real people sign in**. It isn't a feature and it isn't Phase 7. The messaging-patch notes follow below.
+
+## What changed
+
+- **Welcome:** under **Continue with Email** there's a small secondary action, **App Review Demo** ("Sample account with demo data · no sign-in"). It's in every build, TestFlight and App Store included.
+- **App Review Demo** opens the existing seeded Demo (WollyMc's world), reset to its seeded state:
+  - **No Supabase user is created.** There's no sign-in and no OTP; nothing is stored in Supabase Auth.
+  - **No developer privileges:** no developer tools, Graph Debug is closed, no "Enter Demo Account".
+  - **No real-user data:** the Demo's people, Worlds, posts and chats are fixtures on the phone. The test run made **zero** requests to Supabase during the whole Demo session.
+  - **REAL and Demo stay isolated:** the Demo uses its own local store and dataset, and the in-memory Demo chat backend.
+- **"Exit App Review Demo"** sits in a slim blue banner across the top of every screen, and also in Settings. It goes back to Welcome.
+  - The banner sits **above** the app, not over it, so it never covers a header or a button.
+  - Relaunching Chimp inside the App Review Demo keeps the banner.
+- **What a reviewer can explore:**
+  - Boards, with "Created by …" and members
+  - Buzz: For You / Following / Trending / Drift
+  - Happening
+  - You and profiles
+  - Messages: the "Niagara crew" group with reactions, Same Brain, Ping and Open Loops, plus 1:1 practice chats
+  - Stories
+  - After Dark (behind its 18+ gate)
+  - Posting
+- **New in the Demo:**
+  - **Edit and delete your own posts.** Buzz you post in the Demo can now be edited (1 hour) and deleted from its ••• menu, locally.
+  - **A short video that really plays.** The Demo's videos used to be still previews. One 8-second clip is now bundled with the app (an original Chimp-branded animation, 190 KB, H.264). It's first in Buzz → Drift and plays there and in the Drift viewer.
+- **Normal sign-in is unchanged:** Continue with Email → 6-digit code → your account. The developer's own "Enter Demo Account" (Settings) still returns to their account afterwards. The App Review Demo always returns to Welcome.
+- **No secrets in the app, no RLS changes, no migration.**
+
+## For App Store Connect → TestFlight → Test Information → Review notes
+
+> Chimp signs people in with a one-time code sent to their email, so it can't be reviewed with a shared password. To review the app, tap **App Review Demo** on the Welcome screen (below "Continue with Email"). It opens a complete sample account with demo data, with no sign-in. All main features work there: Boards, Buzz (For You / Following / Trending / Drift, with a short video), Happening, profiles, Messages (group chat, reactions, Ping, Open Loops), Stories, After Dark (18+ gate) and posting / editing / deleting your own posts. Nothing in the demo is sent to our servers. Tap **Exit App Review Demo** (top of every screen) to return to the Welcome screen.
+
+## Files
+
+- **New:**
+  - `src/components/AppReviewBanner.tsx`: the banner, and the frame that places the app below it.
+  - `assets/demo/drift-demo.mp4`, `assets/demo/drift-demo-poster.jpg`: the bundled clip.
+- **Changed:**
+  - `src/app/(auth)/welcome.tsx`: the App Review Demo action. The unconfigured-build "Explore the Demo account" link is replaced by it.
+  - `src/store/useSession.ts`: `reviewDemo`, `enterReviewDemo()` (fresh seeded Demo, never a developer), `exitReviewDemo()` (→ Welcome), relaunch keeps the banner.
+  - `src/app/_layout.tsx`: the banner frame.
+  - `src/app/settings.tsx`: "Exit App Review Demo"; no developer section in it.
+  - `src/app/graph-debug.tsx`: closed in the App Review Demo.
+  - `src/services/backend/ownContent.ts`, `src/components/buzz/BuzzCard.tsx`, `src/app/edit-buzz/[id].tsx`: Demo edit/delete of your own posts.
+  - `src/data/drift.ts`, `src/types/models.ts`, `src/graph/surfaces.ts`, `src/components/media/ChimpVideo.tsx`, `src/components/drift/DriftPager.tsx`, `src/app/drift/[id].tsx`: the playable bundled clip.
+  - `BUILD_NOTES.md`, `README.md`.
+
+## Tested locally (web; not on an iPhone or in TestFlight)
+
+- **App Review Demo, on a build configured for a (mock) Supabase project: 31/31.**
+  - Welcome still leads with Continue with Email.
+  - App Review Demo → Buzz with the banner, with no auth token stored.
+  - Every surface listed above opens, with the banner on each; the World shows provenance.
+  - The bundled clip is a real `<video>` and plays (advances).
+  - Post → edit ("Edited") → delete in the Demo.
+  - Settings has no developer tools; Graph Debug is closed.
+  - **No Supabase request of any kind during the Demo** (no auth, no reads, no writes).
+  - Relaunch keeps the banner. Exit → Welcome with the flags cleared; relaunch stays on Welcome.
+  - Normal Email + code sign-in works afterwards, without the banner.
+  - Test-browser note: Playwright's Chromium can't decode H.264, so the test serves the same clip as VP9. The app ships the H.264 MP4, which iPhones play.
+- **Regression:**
+  - web: 6D 72/72, 6C 69/69, 1:1 chat 38/38, avatar 15/15, delete-world 29/29, REAL smoke 33/33, messaging 80/80, REAL → Demo → REAL → logout cycles ×3 completed
+  - Demo route sweep (entering through App Review Demo): 0 errors
+  - Node: 56/56 and 38/38
+  - One timing check in the messaging suite (1:1 Same Brain within 30 s) missed once while everything ran back to back, then passed 80/80 on a rerun.
+  - The only console noise is React Native Web's known "nested <button>" warning in Buzz/Drift.
+- **Checks:** tsc 0 errors, ESLint clean.
+
+## Still to check on a real iPhone (TestFlight build)
+
+1. Fresh install → Welcome shows **App Review Demo** under Continue with Email.
+2. Tap it → Buzz. The blue banner sits **under** the status bar, and no screen has a double gap or a hidden header. Check Buzz, Boards, Happening, You, Messages, a chat, Settings.
+3. Buzz → Drift: the first item is the 8-second Chimp clip, and it **plays**.
+4. Post a Buzz, edit it, delete it.
+5. Force-close and reopen: still in the Demo, with the banner.
+6. **Exit App Review Demo** → Welcome. Continue with Email still sends a code and signs you in normally.
+7. Paste the review note above into App Store Connect and resubmit.
+
+---
+
 # Chimp build notes — final pre-TestFlight messaging patch
 
 28 Sep 2026 · Code in `C:\Users\AI Admin\Documents\Chimp` · Expo SDK 57, Expo Router, TypeScript, Zustand, Supabase. Still Expo Go: one new package, `expo-clipboard`, which is part of Expo Go (no custom build). Phase 7 hasn't started. The v0.6D notes (with 6D.1 and 6D.2) follow below.
