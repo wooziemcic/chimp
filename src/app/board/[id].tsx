@@ -3,7 +3,6 @@ import { StatusBar } from 'expo-status-bar';
 import { Camera, CircleFadingPlus, Film, PenLine, Sparkles } from 'lucide-react-native';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AfterDarkWorld } from '@/components/afterdark/AfterDarkWorld';
 import { BoardHero, HERO_HEIGHT } from '@/components/boards/BoardHero';
@@ -14,6 +13,7 @@ import { Button, EmptyState } from '@/components/ui/misc';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { useGraphCtx } from '@/hooks/useGraph';
+import { useTabBarSpace } from '@/hooks/useLayout';
 import { scoreBoard } from '@/graph/relevance';
 import { buildEdition, buildExplore } from '@/graph/worlds';
 import { worldStillExists } from '@/services/backend/content';
@@ -87,7 +87,8 @@ const EXPLORE_PAGE = 12;
  * same Opportunity Graph as every other surface (graph/worlds.ts).
  */
 function StandardBoard({ board, initialTab }: { board: Board; initialTab: string }) {
-  const insets = useSafeAreaInsets();
+  // Build 5 patch: the shared bottom bar stays on a Board; the last item clears it.
+  const navSpace = useTabBarSpace();
   const [tab, setTab] = useState<BoardTab>(() => LEGACY_TAB[initialTab] ?? (['today', 'explore', 'people'].includes(initialTab) ? (initialTab as BoardTab) : 'today'));
   const markSeen = useChimp((s) => s.markSeen);
   const visitBoard = useChimp((s) => s.visitBoard);
@@ -136,7 +137,7 @@ function StandardBoard({ board, initialTab }: { board: Board; initialTab: string
   return (
     <View style={{ flex: 1, backgroundColor: board.theme.background }}>
       <StatusBar style="light" />
-      <ScrollView ref={scroller} stickyHeaderIndices={[1]} showsVerticalScrollIndicator={false} onScroll={onScroll} scrollEventThrottle={200} contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}>
+      <ScrollView ref={scroller} stickyHeaderIndices={[1]} showsVerticalScrollIndicator={false} onScroll={onScroll} scrollEventThrottle={200} contentContainerStyle={{ paddingBottom: navSpace }}>
         <BoardHero board={board} storyId={story?.id} />
         <View style={[styles.tabsWrap, { backgroundColor: board.theme.background }]}>
           <BoardTabs active={tab} onChange={setTab} theme={board.theme} />

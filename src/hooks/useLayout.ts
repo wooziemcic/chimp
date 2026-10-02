@@ -1,7 +1,9 @@
 import { useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { layout, navScrollSpace } from '@/theme/layout';
+import { layout, navBottomInset, navScrollSpace } from '@/theme/layout';
+
+import { useKeyboardHeight } from './useKeyboard';
 
 /** Height of the floating tab bar, excluding the home-indicator inset (Phase 7C: from the shared layout). */
 export const TAB_BAR_HEIGHT = layout.navHeight;
@@ -13,6 +15,25 @@ export const TAB_BAR_HEIGHT = layout.navHeight;
 export function useTabBarSpace() {
   const insets = useSafeAreaInsets();
   return navScrollSpace(insets.bottom);
+}
+
+/**
+ * Build 5 patch: routes that keep the shared bottom bar although they sit
+ * above the tabs (a Board, a normal 1:1 or group chat). Fullscreen flows
+ * (story viewer, media, camera, modals) are not in the list.
+ */
+export function keepsBottomNav(pathname: string): boolean {
+  return /^\/(board|chat|group)\/[^/]+\/?$/.test(pathname);
+}
+
+/**
+ * Build 5 patch: space a chat composer leaves below itself for the bar. While
+ * the keyboard is up the bar steps aside (0), so the composer sits on the keyboard.
+ */
+export function useComposerNavSpace(): number {
+  const insets = useSafeAreaInsets();
+  const kb = useKeyboardHeight();
+  return kb > 0 ? 0 : layout.navHeight + navBottomInset(insets.bottom) + 8;
 }
 
 /**

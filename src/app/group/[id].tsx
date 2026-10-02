@@ -59,7 +59,7 @@ export default function GroupChat() {
 
   const moderator = c.myRole === 'owner' || c.myRole === 'admin';
   return (
-    <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1, backgroundColor: colors.bg }}>
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg }}>
       <View style={styles.header}>
         <IconButton label="Back" onPress={back}>
           <ChevronLeft size={24} color={colors.ink} />

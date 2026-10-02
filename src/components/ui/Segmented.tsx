@@ -48,7 +48,7 @@ export function Segmented<K extends string>({
             accessibilityState={{ selected: on }}
             accessibilityLabel={o.badge ? `${o.label}, new` : o.label}
             testID={testIDPrefix ? `${testIDPrefix}${o.id}` : undefined}
-            style={[styles.seg, tight && { paddingHorizontal: 1 }, on && { backgroundColor: activeBg }, on && tone !== 'night' && shadow.glow]}
+            style={[styles.seg, (tight || !many) && { paddingHorizontal: tight ? 1 : 2 }, on && { backgroundColor: activeBg }, on && tone !== 'night' && shadow.glow]}
           >
             <T
               v={many ? 'footnote' : 'callout'}
@@ -56,9 +56,10 @@ export function Segmented<K extends string>({
               color={on ? colors.white : tone === 'light' ? colors.inkMuted : 'rgba(255,255,255,0.72)'}
               numberOfLines={1}
               adjustsFontSizeToFit
-              minimumFontScale={0.85}
+              minimumFontScale={many ? 0.85 : 0.92}
               maxFontSizeMultiplier={1.15}
-              style={tight ? { fontSize: 11.5, letterSpacing: -0.2 } : undefined}
+              // Build 5 patch: four labels (Buzz) read at 16 pt; five (After Dark) keep their tight size.
+              style={tight ? { fontSize: 11.5, letterSpacing: -0.2 } : many ? undefined : { fontSize: 16, lineHeight: 20, letterSpacing: -0.2 }}
             >
               {o.label}
             </T>

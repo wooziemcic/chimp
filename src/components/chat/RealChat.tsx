@@ -89,7 +89,7 @@ export function RealChat({ personId, draft }: { personId: string; draft?: string
           : user?.city ?? '';
 
   return (
-    <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1, backgroundColor: colors.bg }}>
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg }}>
       <View style={styles.header}>
         <IconButton label="Back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/messages'))}>
           <ChevronLeft size={24} color={colors.ink} />

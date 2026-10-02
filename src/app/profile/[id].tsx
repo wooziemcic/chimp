@@ -18,6 +18,8 @@ import { T } from '@/components/ui/Text';
 import { crushEligibility, RELATIONSHIP_LABEL } from '@/graph/relevance';
 import { useConnection } from '@/hooks/useConnection';
 import { useGraphCtx, useMatch } from '@/hooks/useGraph';
+import { fetchFollowCounts } from '@/services/backend/content';
+import { isRealMode } from '@/services/dataset';
 import { repo } from '@/services/repository';
 import { useAfterDark } from '@/store/useAfterDark';
 import { useChat } from '@/store/useChat';
@@ -34,6 +36,24 @@ export default function ProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const user = repo.user(id);
   const following = useChimp((s) => s.following);
+  // Build 5 patch (REAL): the person's real Followers / Following totals (were
+  // only "1 if you follow them" / always 0). Re-read when you follow / unfollow.
+  const [counts, setCounts] = useState<{ id: string; followers: number; following: number } | null>(null);
+  const iFollow = !!following[id];
+  useEffect(() => {
+    if (!isRealMode() || !id) return;
+    let live = true;
+    // A moment's delay so a Follow tap's write has landed before re-counting.
+    const t = setTimeout(() => {
+      void fetchFollowCounts(id).then((c) => {
+        if (live && c) setCounts({ id, ...c });
+      });
+    }, 600);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [id, iFollow]);
   const myOpenTo = useChimp((s) => s.profile.openTo);
   const toggleFollow = useChimp((s) => s.toggleFollow);
   const conn = useConnection(id, user?.displayName);
@@ -121,8 +141,8 @@ export default function ProfileScreen() {
           <KnownFor items={user.knownFor} />
           <StatsRow
             stats={[
-              { value: compact(followerCountFor(user.id, following)), label: 'Followers' },
-              { value: compact(user.following), label: 'Following' },
+              { value: compact(counts?.id === user.id ? counts.followers : followerCountFor(user.id, following)), label: 'Followers' },
+              { value: compact(counts?.id === user.id ? counts.following : user.following), label: 'Following' },
               { value: `${match.mutualConnections.length}`, label: 'Mutual' },
               { value: `${match.sharedBoards.length}`, label: 'In common' },
             ]}

@@ -1,5 +1,5 @@
 import { Caveat_600SemiBold, Caveat_700Bold, useFonts } from '@expo-google-fonts/caveat';
-import { DefaultTheme, type Href, router, Stack, ThemeProvider } from 'expo-router';
+import { DefaultTheme, type Href, router, Stack, ThemeProvider, usePathname } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { ActivityIndicator, AppState, View } from 'react-native';
@@ -8,6 +8,9 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AppReviewFrame } from '@/components/AppReviewBanner';
 import { AUTH_BG } from '@/components/auth/palette';
 import { MediaViewer } from '@/components/media/MediaViewer';
+import { NestedTabBar } from '@/components/TabBar';
+import { useKeyboardHeight } from '@/hooks/useKeyboard';
+import { keepsBottomNav } from '@/hooks/useLayout';
 import { T } from '@/components/ui/Text';
 import { isBackendConfigured } from '@/lib/supabase';
 import { useChat } from '@/store/useChat';
@@ -246,6 +249,8 @@ export default function RootLayout() {
           </Stack.Protected>
         </Stack>
         {/* Phase 6B: one global media viewer (a modal, not a route). */}
+        {/* Build 5 patch: the one shared bottom bar also over a Board and normal chats. */}
+        {appReady ? <NestedNav /> : null}
         {appReady ? <MediaViewer /> : null}
         {/* Phase 7C: a quiet "Offline" pill (REAL only; never blocks anything). */}
         {appReady && mode === 'real' ? <OfflineBanner /> : null}
@@ -253,6 +258,14 @@ export default function RootLayout() {
       </ThemeProvider>
     </GestureHandlerRootView>
   );
+}
+
+/** The shared bar over nested screens that keep it (hidden while the keyboard is up). */
+function NestedNav() {
+  const pathname = usePathname();
+  const keyboard = useKeyboardHeight();
+  if (!keepsBottomNav(pathname) || keyboard > 0) return null;
+  return <NestedTabBar />;
 }
 
 function SwitchingScreen() {

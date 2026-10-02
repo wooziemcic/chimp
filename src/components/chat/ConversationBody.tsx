@@ -16,6 +16,7 @@ import { MessageMenu } from './MessageMenu';
 import { PingSheet } from './PingSheet';
 import { RevealCard } from './RevealCard';
 import { useMinuteClock } from './useGroupChemistry';
+import { useComposerNavSpace } from '@/hooks/useLayout';
 
 /** "Today" / "Yesterday" / "Sep 24" separators between days. */
 function dayLabel(iso: string): string {
@@ -76,6 +77,7 @@ export function ConversationBody({ conversationId: cid, group, otherName, placeh
   const [error, setError] = useState<string | null>(null);
   const inner = useRef<ComposerHandle>(null);
   const composer = composerRef ?? inner;
+  const navSpace = useComposerNavSpace();
 
   const data = useMemo(() => [...messages].reverse(), [messages]); // inverted list: newest first
   const byId = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
@@ -193,6 +195,8 @@ export function ConversationBody({ conversationId: cid, group, otherName, placeh
           />
         ))}
 
+      {/* Build 5 patch: room for the shared bottom bar (0 while the keyboard is up). */}
+      <View style={{ height: navSpace }} testID="composer-nav-space" />
       <MessageMenu
         m={menuFor}
         mine={!!menuFor && menuFor.senderId === uid}

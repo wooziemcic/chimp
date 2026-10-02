@@ -1,5 +1,7 @@
+import { type Href, router } from 'expo-router';
 import type { BottomTabBarProps } from 'expo-router/js-tabs';
 import { Flame, LayoutGrid, LucideIcon, Moon, Orbit, User } from 'lucide-react-native';
+import { useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -9,6 +11,7 @@ import { TAB_BAR_HEIGHT } from '@/hooks/useLayout';
 import { useUnseenChanges } from '@/hooks/useGraph';
 import { selectRequests, selectUnread, useChat } from '@/store/useChat';
 import { useChimp } from '@/store/useChimp';
+import { useNavMemory } from '@/store/useUi';
 import { BOARD_THEMES, colors, layout, navBottomInset, night, shadow } from '@/theme';
 import { Tap } from './ui/Tap';
 import { T } from './ui/Text';
@@ -25,14 +28,58 @@ const TABS: Record<string, { label: string; Icon: LucideIcon; fillable: boolean 
   'after-dark': { label: 'After Dark', Icon: Moon, fillable: true },
 };
 
+/** The five surfaces, in bar order. */
+export const PRIMARY_TABS = ['boards', 'buzz', 'happening', 'you', 'after-dark'] as const;
+
+/**
+ * The tabs navigator's bar (adapter): remembers the active tab and renders
+ * the one shared bar.
+ */
+export function TabBar({ state, navigation }: BottomTabBarProps) {
+  const activeRoute = state.routes[state.index]?.name;
+  const setLastTab = useNavMemory((s) => s.setLastTab);
+  useEffect(() => {
+    if (activeRoute && TABS[activeRoute]) setLastTab(activeRoute);
+  }, [activeRoute, setLastTab]);
+  const items = state.routes
+    .filter((r) => TABS[r.name])
+    .map((route) => {
+      const focused = route.name === activeRoute;
+      return {
+        name: route.name,
+        key: route.key,
+        focused,
+        onPress: () => {
+          const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
+          if (!focused && !event.defaultPrevented) navigation.navigate(route.name, route.params);
+        },
+      };
+    });
+  return <ChimpTabBar items={items} dark={activeRoute === 'after-dark'} />;
+}
+
+/**
+ * Build 5 patch: the same bar over normal nested screens (a Board, a 1:1 or
+ * group chat). One instance, mounted once by the root layout. The tab you
+ * came from stays highlighted; any tab takes you back into the tabs, on that tab.
+ */
+export function NestedTabBar() {
+  const lastTab = useNavMemory((s) => s.lastTab);
+  const items = PRIMARY_TABS.map((name) => ({
+    name,
+    key: name,
+    focused: name === lastTab,
+    onPress: () => router.navigate(`/${name}` as Href),
+  }));
+  return <ChimpTabBar items={items} dark={lastTab === 'after-dark'} />;
+}
+
 /**
  * Floating tab bar matching the approved screens. Normal tabs use Chimp
  * blue; After Dark turns the whole bar dark with a magenta active state.
  */
-export function TabBar({ state, navigation }: BottomTabBarProps) {
+function ChimpTabBar({ items, dark }: { items: { name: string; key: string; focused: boolean; onPress: () => void }[]; dark: boolean }) {
   const insets = useSafeAreaInsets();
-  const activeRoute = state.routes[state.index]?.name;
-  const dark = activeRoute === 'after-dark';
   const hasFreshPeople = useUnseenChanges().some((d) => d.type === 'PERSON_BECAME_RELEVANT' || d.type === 'NEW_MATCH');
   const openLoops = useChimp((s) => s.openLoops.filter((l) => l.status === 'active' || l.status === 'progress').length);
   // Phase 6B: unread messages and new Message Requests also light the You dot.
@@ -53,27 +100,23 @@ export function TabBar({ state, navigation }: BottomTabBarProps) {
         style={[StyleSheet.absoluteFill, { top: -18 }]}
       />
       <View style={[styles.bar, dark ? styles.barDark : styles.barLight]} testID="tab-bar">
-        {state.routes.map((route, index) => {
-          const meta = TABS[route.name];
+        {items.map(({ name, key, focused, onPress }) => {
+          const meta = TABS[name];
           if (!meta) return null;
-          const focused = state.index === index;
-          const nightTab = route.name === 'after-dark';
+          const nightTab = name === 'after-dark';
           const color = focused ? (nightTab ? BOARD_THEMES.neonNight.primary : activeColor) : idleColor;
           const { Icon } = meta;
-          const showDot = route.name === 'you' && (hasFreshPeople || openLoops > 0 || unreadChats > 0 || connectRequests > 0) && !focused;
+          const showDot = name === 'you' && (hasFreshPeople || openLoops > 0 || unreadChats > 0 || connectRequests > 0) && !focused;
           return (
             <Tap
-              key={route.key}
+              key={key}
               accessibilityRole="tab"
               accessibilityLabel={meta.label}
               accessibilityState={{ selected: focused }}
               haptic="select"
               scaleTo={0.92}
               style={styles.item}
-              onPress={() => {
-                const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
-                if (!focused && !event.defaultPrevented) navigation.navigate(route.name, route.params);
-              }}
+              onPress={onPress}
             >
               <View>
                 <Icon

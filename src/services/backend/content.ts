@@ -29,6 +29,19 @@ import type { UploadedMedia, UploadedVideo } from './media';
 
 const sb = () => supabase();
 
+/**
+ * Build 5 patch: someone's Followers / Following totals (REAL). Follows are
+ * public (0001 "follows read"), so these are plain counts; null if unavailable.
+ */
+export async function fetchFollowCounts(userId: string): Promise<{ followers: number; following: number } | null> {
+  const [a, b] = await Promise.all([
+    sb().from('follows').select('follower_id', { count: 'exact', head: true }).eq('followee_id', userId),
+    sb().from('follows').select('followee_id', { count: 'exact', head: true }).eq('follower_id', userId),
+  ]);
+  if (a.error || b.error) return null;
+  return { followers: a.count ?? 0, following: b.count ?? 0 };
+}
+
 /** PostgREST: the function isn't on this project (migration not applied yet). */
 export const missingFunction = (e: { code?: string; message?: string }) => e.code === 'PGRST202' || /could not find the function/i.test(e.message ?? '');
 

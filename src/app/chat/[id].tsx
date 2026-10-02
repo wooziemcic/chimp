@@ -15,6 +15,7 @@ import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
 import { colors, radius } from '@/theme';
 import type { ChatMessage } from '@/types/models';
+import { useComposerNavSpace } from '@/hooks/useLayout';
 
 const EMPTY: ChatMessage[] = [];
 
@@ -36,6 +37,7 @@ function DemoChat() {
   const send = useChimp((s) => s.sendMessage);
   const receive = useChimp((s) => s.receiveMessage);
   const [text, setText] = useState(draft ?? '');
+  const navSpace = useComposerNavSpace();
   const list = useRef<FlatList<ChatMessage>>(null);
   const rec = repo.recFor(id);
 
@@ -59,7 +61,7 @@ function DemoChat() {
   };
 
   return (
-    <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1, backgroundColor: colors.bg }}>
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg }}>
       <View style={styles.header}>
         <IconButton label="Back" onPress={() => router.back()}>
           <ChevronLeft size={24} color={colors.ink} />
@@ -104,6 +106,8 @@ function DemoChat() {
             <Send size={18} color={colors.white} />
           </Tap>
         </View>
+        {/* Build 5 patch: room for the shared bottom bar (0 while the keyboard is up). */}
+        <View style={{ height: navSpace }} />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
