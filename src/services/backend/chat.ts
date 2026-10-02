@@ -12,12 +12,13 @@
  */
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
-import { supabase } from '@/lib/supabase';
+import { mediaUrl, supabase } from '@/lib/supabase';
+import { backendError, userMessage } from './errors';
 
 const sb = () => supabase();
 
 function must<T>(res: { data: T | null; error: { message: string; code?: string } | null }, what: string): T {
-  if (res.error) throw Object.assign(new Error(`${what}: ${res.error.message}`), { code: res.error.code });
+  if (res.error) throw backendError(res.error, what, { passThroughCodes: [] });
   return res.data as T;
 }
 
@@ -30,12 +31,25 @@ export interface MessageRow {
   sender_id: string;
   body: string | null;
   media_id: string | null;
-  message_type: 'text' | 'photo';
+  /** 0007: 'voice' (After Dark Vibes only). */
+  message_type: 'text' | 'photo' | 'voice';
   client_id: string | null;
   created_at: string;
   deleted_at: string | null;
   /** 0006: the message this one replies to (same conversation). */
   reply_to?: string | null;
+  /** 0007: a view-once photo (After Dark), and when the recipient opened it. */
+  view_once?: boolean;
+  viewed_at?: string | null;
+  /** 0007: voice note length. */
+  duration_ms?: number | null;
+}
+
+/** 0007: how a message is sent (default: text, or a photo when media is given). */
+export interface SendExtra {
+  kind?: 'photo' | 'voice';
+  viewOnce?: boolean;
+  durationMs?: number;
 }
 
 export interface ConversationRow {
@@ -53,7 +67,7 @@ export interface ConversationRow {
   other_status: MemberStatus;
   last_message_id: string | null;
   last_body: string | null;
-  last_type: 'text' | 'photo' | null;
+  last_type: 'text' | 'photo' | 'voice' | null;
   last_sender: string | null;
   last_at: string | null;
   updated_at: string;
@@ -92,10 +106,22 @@ export async function fetchMessages(conversationId: string, limit = 60): Promise
  * Send one message. `clientId` makes retries idempotent: if the first attempt
  * actually reached the server, the retry returns that same row (no duplicate).
  */
-export async function sendMessage(uid: string, conversationId: string, clientId: string, body: string | null, media?: { id: string } | null, replyTo?: string | null): Promise<MessageRow> {
+export async function sendMessage(uid: string, conversationId: string, clientId: string, body: string | null, media?: { id: string } | null, replyTo?: string | null, extra?: SendExtra): Promise<MessageRow> {
+  const type = media ? extra?.kind ?? 'photo' : 'text';
   const res = await sb()
     .from('messages')
-    .insert({ conversation_id: conversationId, sender_id: uid, body: body?.trim() || null, media_id: media?.id ?? null, message_type: media ? 'photo' : 'text', client_id: clientId, ...(replyTo ? { reply_to: replyTo } : {}) })
+    .insert({
+      conversation_id: conversationId,
+      sender_id: uid,
+      body: body?.trim() || null,
+      media_id: media?.id ?? null,
+      message_type: type,
+      client_id: clientId,
+      ...(replyTo ? { reply_to: replyTo } : {}),
+      // 0007 columns only when used, so a normal message is the same insert as before.
+      ...(extra?.viewOnce ? { view_once: true } : {}),
+      ...(type === 'voice' && extra?.durationMs != null ? { duration_ms: Math.round(extra.durationMs) } : {}),
+    })
     .select('*')
     .single();
   if (res.error?.code === '23505') {
@@ -103,7 +129,7 @@ export async function sendMessage(uid: string, conversationId: string, clientId:
     return must(again, 'Sending') as MessageRow;
   }
   if (res.error && /row-level security|violates row-level/i.test(res.error.message)) {
-    throw new Error('You can’t message this person right now.');
+    throw new Error(extra?.kind === 'voice' ? 'They aren’t taking voice notes right now.' : extra?.viewOnce || extra?.kind === 'photo' ? 'They aren’t taking photos right now.' : 'You can’t message this person right now.');
   }
   return must(res, 'Sending') as MessageRow;
 }
@@ -119,7 +145,6 @@ export async function respondToRequest(conversationId: string, accept: boolean):
 /** Media URLs for photo messages. */
 export async function mediaUrls(ids: string[]): Promise<Record<string, { url: string; aspect?: number }>> {
   if (!ids.length) return {};
-  const { mediaUrl } = await import('@/lib/supabase');
   const rows = must(await sb().from('media').select('id,storage_path,width,height').in('id', ids), 'Loading photos') as { id: string; storage_path: string; width: number | null; height: number | null }[];
   return Object.fromEntries(rows.map((r) => [r.id, { url: mediaUrl(r.storage_path), aspect: r.width && r.height ? r.width / r.height : undefined }]));
 }
@@ -131,7 +156,7 @@ export async function mediaUrls(ids: string[]): Promise<Record<string, { url: st
 
 /** Server messages that are written for people are shown as they are. */
 function said<T>(res: { data: T | null; error: { message: string; code?: string } | null }, what: string): T {
-  if (res.error) throw new Error(res.error.code === '42501' || res.error.code === '22023' ? res.error.message : `${what}: ${res.error.message}`);
+  if (res.error) throw backendError(res.error, what);
   return res.data as T;
 }
 
@@ -195,8 +220,14 @@ export interface LoopRow {
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
+  /** 0007 (After Dark): an Open Loop that became a Plan, and its state. */
+  plan_state?: PlanState | null;
+  plan_at?: string | null;
+  /** Who proposed (or last changed) it: the OTHER person confirms. */
+  plan_by?: string | null;
 }
-export type LoopPatch = Partial<Pick<LoopRow, 'title' | 'note' | 'status' | 'target_date' | 'location_text' | 'board_id'>>;
+export type PlanState = 'proposed' | 'confirmed' | 'paused' | 'completed' | 'closed';
+export type LoopPatch = Partial<Pick<LoopRow, 'title' | 'note' | 'status' | 'target_date' | 'location_text' | 'board_id' | 'plan_state' | 'plan_at'>>;
 
 export async function createGroup(title: string, memberIds: string[], avatarMediaId?: string | null): Promise<string> {
   return said(await sb().rpc('create_group', { p_title: title, p_members: memberIds, p_avatar_media_id: avatarMediaId ?? null }), 'Creating the group') as string;
@@ -249,6 +280,47 @@ export async function cancelPing(id: string): Promise<void> {
 export async function fetchPingMatches(cid: string): Promise<PingMatchRow[]> {
   return must(await sb().from('ping_matches').select('*').eq('conversation_id', cid).order('created_at', { ascending: false }).limit(50), 'Loading matches') as PingMatchRow[];
 }
+/**
+ * Phase 7B: open a view-once photo. Only the view-once server function can
+ * read the private file: it checks (recipient, once, Vibe active, nobody
+ * blocked), records the opening, deletes the file and hands the bytes back
+ * this one time. The photo is shown from memory; there is no URL to keep.
+ */
+export async function openViewOnce(messageId: string): Promise<string | null> {
+  const { data, error } = await sb().functions.invoke('view-once', { body: { action: 'open', message_id: messageId } });
+  if (error) throw new Error(await functionError(error, 'This photo couldn’t be opened. Try again.'));
+  const r = (data ?? {}) as { ok?: boolean; mime?: string; data?: string; error?: string };
+  if (!r.ok || !r.data) throw new Error(r.error ?? 'This photo isn’t available.');
+  const mime = /^image\/(jpeg|png|webp|heic)$/.test(r.mime ?? '') ? r.mime : 'image/jpeg';
+  return `data:${mime};base64,${r.data}`;
+}
+
+/** Is view-once set up on this project (the function deployed)? null = couldn't tell (offline). */
+let viewOnceReady: boolean | null = null;
+export async function viewOnceAvailable(): Promise<boolean | null> {
+  if (viewOnceReady !== null) return viewOnceReady;
+  const { data, error } = await sb().functions.invoke('view-once', { body: { action: 'ping' } });
+  if (!error) return (viewOnceReady = !!(data as { ok?: boolean } | null)?.ok);
+  const status = (error as { context?: Response }).context?.status;
+  if (status === 404) return (viewOnceReady = false);
+  return null;
+}
+
+/** An Edge Function's refusal → the sentence it sent (or a plain one). */
+async function functionError(error: { message: string }, fallback: string): Promise<string> {
+  const ctx = (error as { context?: Response }).context;
+  try {
+    if (ctx && typeof ctx.json === 'function') {
+      const body = (await ctx.json()) as { error?: string; code?: string };
+      if (body.error) return body.error;
+      if (ctx.status === 404) return 'View-once photos aren’t set up on the server yet.';
+    }
+  } catch {
+    /* not JSON */
+  }
+  return userMessage(error.message, fallback);
+}
+
 export async function fetchLoops(cid: string): Promise<LoopRow[]> {
   return must(await sb().from('chat_loops').select('*').eq('conversation_id', cid).order('created_at', { ascending: false }), 'Loading Open Loops') as LoopRow[];
 }

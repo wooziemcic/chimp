@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 import { Search as SearchIcon, X } from 'lucide-react-native';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { KeyboardAvoidingView, Platform, SectionList, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -11,6 +11,7 @@ import { EmptyState } from '@/components/ui/misc';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { interestById } from '@/data/interests';
+import { type PersonHit, searchPeople } from '@/services/backend/people';
 import { repo } from '@/services/repository';
 import { colors, radius } from '@/theme';
 import type { Href } from 'expo-router';
@@ -32,11 +33,16 @@ function matches(q: string, ...fields: (string | undefined)[]) {
   return fields.some((f) => f?.toLowerCase().includes(q));
 }
 
-/** Local search across people, Boards and Moves. */
+/**
+ * Search across people, Boards and Moves on this phone — and (REAL, Phase
+ * 7B) people on the server too, so someone who just joined can be found
+ * before they show up anywhere in your world.
+ */
 export default function SearchScreen() {
   const insets = useSafeAreaInsets();
   const [q, setQ] = useState('');
   const query = q.trim().toLowerCase();
+  const remote = useRemotePeople(query);
 
   const sections = useMemo(() => {
     if (!query) return [];
@@ -52,12 +58,18 @@ export default function SearchScreen() {
       .moves()
       .filter((m) => matches(query, m.title, m.subtitle, m.city, m.description, ...m.interests.map((i) => interestById[i]?.label)))
       .map((m) => ({ key: m.id, title: m.title, subtitle: `Move · ${m.city} · ${m.dateLabel}`, image: m.image, href: `/move/${m.id}` }));
+    const local = new Set(people.map((p) => p.key));
+    for (const h of remote) {
+      if (local.has(h.id) || repo.isMe(h.id)) continue;
+      const name = h.display_name || (h.username ? `@${h.username}` : 'Someone');
+      people.push({ key: h.id, title: name, subtitle: [h.username ? `@${h.username}` : null, h.city].filter(Boolean).join(' · '), image: h.avatar_url ?? undefined, round: true, href: `/profile/${h.id}` });
+    }
     return [
       { title: 'People', data: people },
       { title: 'Boards', data: boards },
       { title: 'Moves', data: moves },
     ].filter((s) => s.data.length);
-  }, [query]);
+  }, [query, remote]);
 
   const go = (href: Href) => {
     router.back();
@@ -130,6 +142,26 @@ export default function SearchScreen() {
     </KeyboardAvoidingView>
   );
 }
+
+/** REAL accounts: server search (debounced; quietly empty offline or before 0008). */
+function useRemotePeople(query: string): PersonHit[] {
+  const [hits, setHits] = useState<{ q: string; rows: PersonHit[] }>({ q: '', rows: [] });
+  useEffect(() => {
+    if (repo.mode() !== 'real' || query.length < 2) return;
+    let live = true;
+    const t = setTimeout(() => {
+      searchPeople(query)
+        .then((rows) => live && setHits({ q: query, rows }))
+        .catch(() => live && setHits({ q: query, rows: [] }));
+    }, 300);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [query]);
+  return hits.q === query ? hits.rows : EMPTY_HITS;
+}
+const EMPTY_HITS: PersonHit[] = [];
 
 const styles = StyleSheet.create({
   grabber: { alignSelf: 'center', width: 38, height: 5, borderRadius: 3, backgroundColor: colors.lineStrong, marginTop: 8 },

@@ -1,6 +1,6 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, useWindowDimensions, View } from 'react-native';
 
 import { AuthScreen, ErrorNote, OtpBoxes, PrimaryButton, TextLink } from '@/components/auth/AuthUI';
@@ -8,7 +8,8 @@ import { ChimpWorld } from '@/components/auth/ChimpWorld';
 import { auth } from '@/components/auth/palette';
 import { T } from '@/components/ui/Text';
 import { useKeyboardHeight } from '@/hooks/useKeyboard';
-import { maskEmail, sendCode, verifyCode } from '@/services/backend/auth';
+import { currentUserId, maskEmail, sendCode, verifyCode } from '@/services/backend/auth';
+import { diag, userMessage } from '@/services/backend/errors';
 import { useSession } from '@/store/useSession';
 
 const RESEND_AFTER = 60;
@@ -35,6 +36,11 @@ export default function VerifyScreen() {
   const [sent, setSent] = useState<string | null>(null);
   const [wait, setWait] = useState(RESEND_AFTER);
   const [spare, setSpare] = useState(0);
+  // Phase 7B: one verification at a time (autofill / paste can fire twice), and
+  // once a code has worked we never ask for another one — only finishing
+  // sign-in is retried.
+  const running = useRef(false);
+  const [verified, setVerified] = useState(false);
 
   useEffect(() => {
     if (wait <= 0) return;
@@ -42,20 +48,47 @@ export default function VerifyScreen() {
     return () => clearTimeout(t);
   }, [wait]);
 
+  /** The code worked: load (or create) the profile, with retries, then let the gate route. */
+  const finish = async (uid: string, mail?: string) => {
+    try {
+      await signedIn(uid, mail);
+      router.replace('/');
+    } catch (e) {
+      diag('sign-in bootstrap failed');
+      setError(userMessage(e, 'We couldn’t finish signing you in. Try again.'));
+    }
+  };
+
   const verify = async (value = code) => {
-    if (value.length !== CODE || busy) return;
+    if (value.length !== CODE || running.current) return;
+    running.current = true;
     setBusy(true);
     setError(null);
     setSent(null);
     try {
-      const user = await verifyCode(email, value);
+      if (verified) {
+        // The code already worked; only signing in needs another try.
+        const u = await currentUserId();
+        if (u) await finish(u.id, u.email);
+        else {
+          setVerified(false);
+          setError('Your sign-in expired. Request a new code.');
+        }
+        return;
+      }
+      let user: { id: string; email: string };
+      try {
+        user = await verifyCode(email, value);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setCode('');
+        return;
+      }
+      setVerified(true);
       // Finished profile → Buzz; new or unfinished → onboarding (the gate decides).
-      await signedIn(user.id, user.email);
-      router.replace('/');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setCode('');
+      await finish(user.id, user.email);
     } finally {
+      running.current = false;
       setBusy(false);
     }
   };
@@ -66,6 +99,7 @@ export default function VerifyScreen() {
     try {
       await sendCode(email);
       setWait(RESEND_AFTER);
+      setVerified(false);
       setCode('');
       setSent('A new code is on its way. Use the newest email.');
     } catch (e) {
@@ -93,7 +127,7 @@ export default function VerifyScreen() {
         <ErrorNote text={error} />
         {sent ? <T style={styles.sent}>{sent}</T> : null}
         <View style={{ marginTop: 18 }}>
-          <PrimaryButton label="Verify" onPress={() => void verify()} disabled={code.length !== CODE} loading={busy} />
+          <PrimaryButton label={verified ? 'Try again' : 'Verify'} onPress={() => void verify()} disabled={code.length !== CODE && !verified} loading={busy} />
         </View>
         <View style={styles.links}>
           {wait > 0 ? (

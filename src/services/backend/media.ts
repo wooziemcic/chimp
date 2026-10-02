@@ -36,7 +36,7 @@ export interface UploadedMedia {
   mimeType: string;
 }
 
-export type MediaFolder = 'avatars' | 'posts' | 'drift' | 'stories' | 'chat' | `boards/${string}`;
+export type MediaFolder = 'avatars' | 'posts' | 'drift' | 'stories' | 'chat' | 'afterdark' | `boards/${string}`;
 
 /** Long-edge caps per use (px). */
 export const MAX_EDGE = { avatar: 1200, post: 1600, story: 1600, cover: 1800 } as const;
@@ -112,6 +112,60 @@ export async function uploadImage(userId: string, folder: MediaFolder, img: Pick
     throw new Error(`Couldn’t save media: ${row.error.message}`);
   }
   return { id: row.data.id as string, url: mediaUrl(path), path, width: img.width, height: img.height, mimeType: 'image/jpeg' };
+}
+
+/**
+ * Phase 7B: a view-once photo goes to the PRIVATE bucket `vibe-media`, in
+ * your own once/{you}/ folder. Nobody — you included — can read it back from
+ * the app: only the view-once server function opens it, once, for the
+ * recipient, and deletes it. There is no URL (`url` is empty).
+ */
+export const PRIVATE_BUCKET = 'vibe-media';
+export async function uploadPrivateImage(userId: string, img: PickedImage): Promise<UploadedMedia> {
+  const sb = supabase();
+  const path = `once/${userId}/${rid()}.jpg`;
+  const bytes = await readBytes(img.uri);
+  const up = await sb.storage.from(PRIVATE_BUCKET).upload(path, bytes, { contentType: 'image/jpeg', upsert: false });
+  if (up.error) throw new Error(/bucket not found/i.test(up.error.message) ? 'View-once photos aren’t set up on the server yet.' : `Upload failed: ${up.error.message}`);
+  const row = await sb
+    .from('media')
+    .insert({ owner_id: userId, bucket: PRIVATE_BUCKET, storage_path: path, kind: 'image', mime_type: 'image/jpeg', width: img.width, height: img.height, bytes: bytes.byteLength })
+    .select('id')
+    .single();
+  if (row.error) {
+    // The file can't be removed by the app (no delete on the private bucket); the server sweep removes it.
+    throw new Error(`Couldn’t save media: ${row.error.message}`);
+  }
+  return { id: row.data.id as string, url: '', path, width: img.width, height: img.height, mimeType: 'image/jpeg' };
+}
+
+/**
+ * Phase 7A: upload a voice note (After Dark) into your own chat folder and
+ * record it as `audio` media. Same rules as photos: a fresh file name, and
+ * the file is removed again if its row can't be saved.
+ */
+export async function uploadAudio(userId: string, uri: string, durationMs: number): Promise<UploadedMedia> {
+  const sb = supabase();
+  // iOS/Android record AAC in .m4a; the web recorder produces webm.
+  const ext = /\.webm($|\?)/.test(uri) || (Platform.OS === 'web' && !/\.m4a($|\?)/.test(uri)) ? 'webm' : 'm4a';
+  const mimeType = ext === 'webm' ? 'audio/webm' : 'audio/mp4';
+  const path = `chat/${userId}/${rid()}.${ext}`;
+  const bytes = await readBytes(uri);
+  const up = await sb.storage.from(MEDIA_BUCKET).upload(path, bytes, { contentType: mimeType, upsert: false });
+  if (up.error) throw new Error(`Upload failed: ${up.error.message}`);
+  const row = await sb
+    .from('media')
+    .insert({ owner_id: userId, bucket: MEDIA_BUCKET, storage_path: path, kind: 'audio', mime_type: mimeType, duration_ms: Math.round(durationMs), bytes: bytes.byteLength })
+    .select('id')
+    .single();
+  if (row.error) {
+    await sb.storage
+      .from(MEDIA_BUCKET)
+      .remove([path])
+      .catch(() => undefined);
+    throw new Error(`Couldn’t save the voice note: ${row.error.message}`);
+  }
+  return { id: row.data.id as string, url: mediaUrl(path), path, width: 0, height: 0, mimeType };
 }
 
 /**

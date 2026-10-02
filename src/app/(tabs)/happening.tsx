@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
 import { Activity, CalendarDays, ChevronRight, Heart, Link2, Sparkles, Target, Users } from 'lucide-react-native';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FlatList, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -22,11 +22,13 @@ import { type LiveItem, buildLiveActivity } from '@/graph/live';
 import { buildHappening, driftStories, isNightRef } from '@/graph/surfaces';
 import { freshCount } from '@/graph/touch';
 import { useGraphCtx } from '@/hooks/useGraph';
+import { useImpression } from '@/hooks/useImpression';
 import { useTabBarSpace } from '@/hooks/useLayout';
 import { useNow } from '@/hooks/useNow';
-import { useDataset } from '@/services/dataset';
+import { ds, useDataset } from '@/services/dataset';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
+import { useExposure } from '@/store/useExposure';
 import { colors, radius, shadow } from '@/theme';
 import type { HappeningItem, HappeningKind } from '@/types/models';
 import { hrefFor } from '@/utils/links';
@@ -37,7 +39,7 @@ const KIND: Record<HappeningKind, { label: string; Icon: typeof Sparkles }> = {
   plan: { label: 'YOUR PLAN', Icon: CalendarDays },
   people: { label: 'PEOPLE', Icon: Users },
   match: { label: 'SUGGESTED MATCH', Icon: Link2 },
-  spark: { label: 'SPARK', Icon: Heart },
+  spark: { label: 'MUTUAL CRUSH', Icon: Heart },
   loop: { label: 'OPEN LOOP', Icon: Target },
   change: { label: 'WHAT CHANGED', Icon: Sparkles },
 };
@@ -49,7 +51,9 @@ const KIND: Record<HappeningKind, { label: string; Icon: typeof Sparkles }> = {
  *   1. the Opportunity Graph — endless, cyclic, collision-free lanes
  *   2. Friends & Connections — your story, friends' stories, Worlds' stories
  *   3. Live across your graph — what's moving (real events only)
- *   4. Why this matters — the few things that matter most, each with its reason
+ *   4. Changed in your world — the few deltas that matter most now, each with its
+ *      reason (Phase 7C: ranked by decomposed signals; the selection and its
+ *      signals are kept for Graph Debug)
  *   5. Moves tied to your Worlds
  * Never After Dark.
  */
@@ -63,6 +67,20 @@ export default function HappeningScreen() {
   const [selected, setSelected] = useState<string | null>(null);
 
   const items = useMemo(() => buildHappening(ctx).slice(0, 3), [ctx]);
+  // Phase 7C: keep why each change was selected (signals, reasons) — local, for Graph Debug.
+  useEffect(() => {
+    useExposure.getState().logSelections(
+      ds().me.id,
+      items.filter((it) => it.selection).map((it) => ({
+        key: `${it.ref.kind}:${it.ref.id}`,
+        at: ctx.now,
+        total: it.selection!.total,
+        signals: it.selection!.signals,
+        penalties: it.selection!.penalties,
+        why: it.why,
+      })),
+    );
+  }, [items, ctx.now]);
   const now = useNow();
   const live = useMemo(() => buildLiveActivity(ctx, seen, now), [ctx, seen, now]);
   const stories = useMemo(() => driftStories(ctx, seen), [ctx, seen]);
@@ -126,10 +144,7 @@ export default function HappeningScreen() {
     <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg }}>
       <StatusBar style="dark" />
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: bottom }}>
-        <PageHeader title="Happening" />
-        <T v="subhead" color={colors.inkMuted} style={{ paddingHorizontal: 20, marginTop: -8 }}>
-          What’s moving across your world right now
-        </T>
+        <PageHeader title="Happening" subtitle="What’s moving across your world right now" />
 
         <HappeningGraph graph={graph} selected={selected} onSelect={onSelect} />
         {selectedNode ? (
@@ -202,11 +217,11 @@ export default function HappeningScreen() {
         <View style={styles.listHead}>
           <Sparkles size={16} color={colors.accent} />
           <T v="eyebrow" color={colors.inkMuted} style={{ marginLeft: 8 }}>
-            WHY THIS MATTERS TO YOU
+            CHANGED IN YOUR WORLD
           </T>
         </View>
         {items.length ? (
-          <View style={{ paddingHorizontal: 16, gap: 10 }}>
+          <View style={{ paddingHorizontal: 16, gap: 10 }} testID="happening-changed">
             {items.map((it) => (
               <HappeningCard key={it.id} item={it} />
             ))}
@@ -255,6 +270,7 @@ function LiveRow({ item, first }: { item: LiveItem; first: boolean }) {
 }
 
 function HappeningCard({ item }: { item: HappeningItem }) {
+  useImpression(`happening:${item.ref.kind}:${item.ref.id}`);
   const k = KIND[item.kind];
   const round = item.ref.kind === 'person';
   return (

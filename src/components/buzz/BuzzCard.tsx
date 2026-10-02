@@ -21,6 +21,7 @@ import { colors, radius, shadow } from '@/theme';
 import type { BuzzItem } from '@/types/models';
 import { compact, whenLabel } from '@/utils/format';
 import { pushOnce } from '@/utils/nav';
+import { useImpression } from '@/hooks/useImpression';
 
 interface Props {
   item: BuzzItem;
@@ -40,6 +41,7 @@ interface Props {
  * Like / reply / repost / save; dislike is private and collapses the card with an Undo.
  */
 export const BuzzCard = memo(function BuzzCard({ item, width, expanded }: Props) {
+  useImpression(expanded ? null : `buzz:${item.id}`);
   const disliked = useChimp((s) => !!s.buzzDislikes[item.id]);
   const toggleDislike = useChimp((s) => s.toggleBuzzDislike);
 
@@ -97,15 +99,17 @@ function WorldChip({ boardId, onDark, authorId }: { boardId: string; onDark?: bo
   // Phase 6D provenance: a quiet note when the author is the person who made this World.
   const byCreator = !!authorId && !!b.ownerId && authorId === (b.creatorId ?? b.ownerId);
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      <Tap onPress={() => pushOnce(`/board/${b.id}`)} scaleTo={0.95} style={[styles.chip, onDark && styles.chipOnDark]} accessibilityLabel={`Open ${b.title}`}>
+    // Phase 7C: everything here shrinks or wraps inside its card — the World name
+    // truncates, and "Creator" moves under it when there's no room beside it.
+    <View style={styles.chipRow}>
+      <Tap onPress={() => pushOnce(`/board/${b.id}`)} scaleTo={0.95} style={[styles.chip, onDark && styles.chipOnDark]} accessibilityLabel={`Open ${b.title}`} testID="world-chip">
         <CategoryIcon id={b.category} size={12} color={colors.accent} />
-        <T v="caption" color={colors.ink2} weight="600" numberOfLines={1} style={{ marginLeft: 5, fontSize: 12 }}>
+        <T v="caption" color={colors.ink2} weight="600" numberOfLines={1} ellipsizeMode="tail" style={{ marginLeft: 5, fontSize: 12, flexShrink: 1 }}>
           {b.title}
         </T>
       </Tap>
       {byCreator ? (
-        <T v="caption" color={colors.inkFaint} weight="600" style={{ marginLeft: 6, fontSize: 11.5 }} testID="creator-tag">
+        <T v="caption" color={colors.inkFaint} weight="600" numberOfLines={1} style={{ fontSize: 11.5, flexShrink: 0 }} testID="creator-tag">
           Creator
         </T>
       ) : null}
@@ -153,18 +157,18 @@ function Author({ item, expanded }: { item: BuzzItem; expanded?: boolean }) {
       <Tap onPress={() => pushOnce(`/profile/${u.id}`)} accessibilityLabel={u.displayName}>
         <Avatar uri={u.avatar} name={u.displayName} size={38} />
       </Tap>
-      <View style={{ flex: 1, marginLeft: 9 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <T v="subhead" weight="700" numberOfLines={1} style={{ flexShrink: 1 }}>
+      <View style={{ flex: 1, minWidth: 0, marginLeft: 9 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', minWidth: 0 }}>
+          <T v="subhead" weight="700" numberOfLines={1} ellipsizeMode="tail" style={{ flexShrink: 1 }}>
             {u.username}
           </T>
-          {u.verified ? <BadgeCheck size={14} color={colors.white} fill={colors.accent} style={{ marginLeft: 3 }} /> : null}
-          <T v="caption" color={colors.inkFaint} weight="500" style={{ marginLeft: 5 }} testID="buzz-when">
+          {u.verified ? <BadgeCheck size={14} color={colors.white} fill={colors.accent} style={{ marginLeft: 3, flexShrink: 0 }} /> : null}
+          <T v="caption" color={colors.inkFaint} weight="500" numberOfLines={1} style={{ marginLeft: 5, flexShrink: 0 }} testID="buzz-when">
             {when(item)}
           </T>
         </View>
         {repo.board(item.boardId) ? (
-          <View style={{ marginTop: 3, flexDirection: 'row' }}>
+          <View style={{ marginTop: 3, flexDirection: 'row', minWidth: 0, maxWidth: '100%' }}>
             <WorldChip boardId={item.boardId} authorId={item.authorId} />
           </View>
         ) : null}
@@ -178,17 +182,17 @@ function Author({ item, expanded }: { item: BuzzItem; expanded?: boolean }) {
 function Byline({ item, expanded }: { item: BuzzItem; expanded?: boolean }) {
   const u = item.authorId ? repo.user(item.authorId) : undefined;
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 8, gap: 6 }}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 8, gap: 6, minWidth: 0 }}>
       {u ? (
-        <Tap onPress={() => pushOnce(`/profile/${u.id}`)} style={{ flexDirection: 'row', alignItems: 'center' }} accessibilityLabel={u.displayName}>
+        <Tap onPress={() => pushOnce(`/profile/${u.id}`)} style={{ flexDirection: 'row', alignItems: 'center', flexShrink: 1, minWidth: 0, maxWidth: '100%' }} accessibilityLabel={u.displayName}>
           <Avatar uri={u.avatar} name={u.displayName} size={22} />
-          <T v="footnote" weight="700" style={{ marginLeft: 6 }} numberOfLines={1}>
+          <T v="footnote" weight="700" style={{ marginLeft: 6, flexShrink: 1 }} numberOfLines={1} ellipsizeMode="tail">
             {u.username}
           </T>
-          {u.verified ? <BadgeCheck size={13} color={colors.white} fill={colors.accent} style={{ marginLeft: 3 }} /> : null}
+          {u.verified ? <BadgeCheck size={13} color={colors.white} fill={colors.accent} style={{ marginLeft: 3, flexShrink: 0 }} /> : null}
         </Tap>
       ) : null}
-      <T v="caption" color={colors.inkFaint} weight="500" testID="buzz-when">
+      <T v="caption" color={colors.inkFaint} weight="500" numberOfLines={1} testID="buzz-when">
         {when(item)}
       </T>
       <WorldChip boardId={item.boardId} authorId={item.authorId} />
@@ -277,7 +281,7 @@ function Poll({ item }: { item: BuzzItem }) {
 
 function TextCard({ item, width, onPress, expanded }: { item: BuzzItem; width: number; onPress?: () => void; expanded?: boolean }) {
   return (
-    <View style={[styles.card, { width }]}>
+    <View style={[styles.card, { width }]} testID="buzz-card">
       <Author item={item} expanded={expanded} />
       <Tap onPress={onPress} disabled={!onPress} scaleTo={0.99} accessibilityLabel={item.title ?? item.body ?? item.poll?.question}>
         {item.title ? (
@@ -318,7 +322,7 @@ function MediaCard({ item, width, onPress, expanded }: { item: BuzzItem; width: 
   // Short captions get the bold editorial treatment; long ones read as text.
   const bold = caption.length > 0 && caption.length <= 90;
   return (
-    <View style={[styles.cardFlat, { width }]}>
+    <View style={[styles.cardFlat, { width }]} testID="buzz-card">
       {imgs.length > 1 ? (
         <View>
           <ScrollView
@@ -376,7 +380,7 @@ function VideoCard({ item, width, onPress, expanded }: { item: BuzzItem; width: 
   const h = Math.round(width / Math.min(1.91, Math.max(0.8, v.aspect && v.aspect > 0 ? v.aspect : 0.8)));
   const bold = caption.length > 0 && caption.length <= 90;
   return (
-    <View style={[styles.cardFlat, { width }]}>
+    <View style={[styles.cardFlat, { width }]} testID="buzz-card">
       <Tap onPress={() => openVideo(v, viewerMeta(item))} scaleTo={0.995} accessibilityLabel="Play video">
         <VideoPoster poster={v.poster ?? item.image} durationMs={v.durationMs} width={width} height={h} />
       </Tap>
@@ -429,7 +433,7 @@ function NewsCard({ item, width, onPress, expanded }: { item: BuzzItem; width: n
     );
   }
   return (
-    <View style={[styles.card, { width }]}>
+    <View style={[styles.card, { width }]} testID="buzz-card">
       <Tap onPress={onPress} disabled={!onPress} scaleTo={0.99} accessibilityLabel={n.headline}>
       <View style={{ flexDirection: 'row' }}>
         <Img uri={item.image} style={styles.newsThumb} />
@@ -513,7 +517,8 @@ const styles = StyleSheet.create({
   cardFlat: { borderRadius: radius.xl, backgroundColor: colors.surface, overflow: 'hidden', ...shadow.sm },
   collapsed: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingLeft: 14, paddingRight: 6, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
   undo: { minHeight: 40, paddingHorizontal: 10, justifyContent: 'center' },
-  chip: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', height: 24, paddingHorizontal: 8, borderRadius: 12, backgroundColor: colors.accentSoft, maxWidth: 190 },
+  chipRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', columnGap: 6, rowGap: 2, minWidth: 0, maxWidth: '100%', flexShrink: 1 },
+  chip: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', height: 24, paddingHorizontal: 8, borderRadius: 12, backgroundColor: colors.accentSoft, maxWidth: '100%', minWidth: 0, flexShrink: 1, overflow: 'hidden' },
   chipOnDark: { backgroundColor: 'rgba(255,255,255,0.92)' },
   actions: { flexDirection: 'row', alignItems: 'center', marginTop: 8, marginHorizontal: -6 },
   act: { flexDirection: 'row', alignItems: 'center', minHeight: 40, paddingHorizontal: 6, marginRight: 4 },

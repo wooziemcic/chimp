@@ -8,8 +8,10 @@ Since Phase 6A, a real person can **sign up** (since Phase 6D: **Continue with E
 
 - **Stack:** Expo SDK 57, Expo Router, React Native 0.86, TypeScript, zustand, AsyncStorage, Supabase
 - **Target:** iPhone 12 (390 × 844 pt) in **Expo Go**
-- **Native modules:** only the ones Expo Go already bundles (no development build needed)
+- **Native modules:** only ones Expo Go also bundles. Since Phase 7C that includes `expo-notifications`, `expo-device` and `@react-native-community/netinfo`, so TestFlight needs a **new EAS build** (Build 4 doesn't have them). Real push notifications only work in that build, not in Expo Go.
 
+
+**Phase 7C (Oct 2026):** one shared layout system for normal Chimp and After Dark; decomposed, explainable ranking signals (timing, intent, repetition, saturation) for people, Buzz For You, Happening ("Changed in your world") and After Dark Discover; server-side product events (no content, ever); idempotent Follow / Crush; push notifications (database outbox → `push` Edge Function → Expo → APNs, After Dark always generic); Settings → Notifications; an offline pill. Setup steps: `BUILD_NOTES.md` → v0.7C → "What you must do once".
 ---
 
 ## Run it on your iPhone 12 (Windows + Expo Go)
@@ -830,3 +832,57 @@ Apple's reviewer couldn't get past email sign-in (Guideline 2.1(a)). Welcome now
 
 Details, the App Store Connect review note and the iPhone checks are in `BUILD_NOTES.md`.
 
+
+## Phase 7A: After Dark v2 foundation
+
+After Dark is now a romantic interaction layer built on Chimp's existing primitives: **real attraction, mutual intent, playful chemistry, real plans.** It is still 18+, never explicit, and has its own visual territory (black and plum, Chimp pink). The bottom bar is unchanged.
+
+- **Five top tabs:**
+  - **Discover**: big photo cards of adults who opted in. You see broad location only, plain "Why you may vibe" context, and their Open Loop. You can Pass, Crush (private), or Respond / Send interest.
+  - **Vibes**: a pair object ("You + Maya"). Status is Active / Pending / Cooling / Paused / Closed, and the stage is described in words (Curious → Spark → Building → Strong Vibe), never as a number.
+  - **Challenges**: quick games for two. Answers are revealed only after both people play.
+  - **Plans**: Open Loops with a plan state (Proposed → Confirmed → Completed; Paused / Closed). They are private to the pair, and only the other person can confirm a plan.
+  - **Inbox**: one conversation per Vibe, separate from normal Messages.
+- **Consent:** the person who was asked controls the next level of access.
+  - A Vibe stays pending until they accept.
+  - Photos (including view-once) and voice notes reach someone only if they allow them; photos are off by default.
+  - A mutual Crush only *offers* "Start normal chat" or "Take it After Dark"; it never moves anyone into After Dark.
+- **Leaving:** every Vibe has Pause / End / Block / Report. End reasons stay private, and the other person sees only "This Vibe has ended."
+- **Backend:** migration `supabase/migrations/0007_phase7a_after_dark.sql` (run it after 0006). Voice notes use `expo-audio`, which needs a new native build.
+- **Loading:** After Dark loads nothing until it's opened.
+- **Demo:** fully seeded, and nothing is sent anywhere.
+
+Details, security review and the iPhone checklist are in `BUILD_NOTES.md`.
+
+## Phase 7B: reliability, realtime, security & logic hardening
+
+Chimp now behaves the same on two real phones as on one: people, connections, Crushes, Vibes, challenges and Plans stay current without restarting the app.
+
+- **Opening anyone by id works.**
+  - A profile that isn't on the phone yet is fetched: **Loading…**, then the profile.
+  - "This profile isn't available" appears only when the server confirms it.
+  - Search also asks the server, so brand-new accounts are findable.
+- **Sign-in is calm.**
+  - Supabase's intermittent "JWT issued at future" is retried briefly and never shown.
+  - A device clock that's far off is detected and explained.
+  - A double autofill or paste verifies once.
+  - Errors are plain sentences.
+- **Connections are live and idempotent.**
+  - Requests arrive in seconds (a private per-account `user_events` Realtime feed), appear on **You** with Accept / Decline, and light up the You tab.
+  - A double-tapped Accept is one Accept.
+  - Coming back to the app, or a dropped connection, re-reads what changed.
+- **After Dark:**
+  - Vibe and Plan updates arrive live.
+  - Requests expire after 14 days.
+  - New **Two Truths and a Lie** challenge.
+  - View-once photos live in a private bucket, and only the `view-once` Edge Function opens them: once, for the recipient.
+- **Safety:**
+  - Age can't be hopped.
+  - Reports have a moderation status and a server-only queue.
+  - An independent security review's findings (one High: cross-user file deletion through World teardown) are fixed and regression-tested.
+- **Backend:**
+  - Migration `supabase/migrations/0008_phase7b_reliability.sql`: run it after 0007.
+  - Deploy the `view-once` function and redeploy `delete-account`.
+  - No new native modules.
+
+The setup steps, test results and two-phone test plan are in `BUILD_NOTES.md`. **7B is not complete until the two-phone script passes on the real project.**

@@ -8,19 +8,21 @@ import { Img } from '@/components/ui/Img';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { interestById } from '@/data/interests';
+import { useConnection } from '@/hooks/useConnection';
 import { useMatch } from '@/hooks/useGraph';
-import { useChimp } from '@/store/useChimp';
 import { colors, radius, shadow } from '@/theme';
 import type { User } from '@/types/models';
+import { useImpression } from '@/hooks/useImpression';
 
 /**
  * "People You Should Meet" card. The reason leads; the percentage supports
  * it. Photo-forward like a dating profile, but the ask is to connect.
  */
 export const MatchCard = memo(function MatchCard({ person, width }: { person: User; width: number }) {
+  useImpression(`person:${person.id}`);
   const match = useMatch(person.id);
-  const connected = useChimp((s) => !!s.connections[person.id]);
-  const toggleConnect = useChimp((s) => s.toggleConnect);
+  const conn = useConnection(person.id, person.displayName);
+  const connected = conn.view === 'connected';
   const shared = match?.sharedInterests ?? [];
   const chips = [...shared, ...person.interests.filter((i) => !shared.includes(i))].slice(0, 3);
   const photoH = width * 0.62;
@@ -70,14 +72,15 @@ export const MatchCard = memo(function MatchCard({ person, width }: { person: Us
         </View>
         <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
           <Tap
-            onPress={() => toggleConnect(person.id)}
+            onPress={conn.press}
             haptic="medium"
-            accessibilityLabel={connected ? `Disconnect from ${person.displayName}` : `Connect with ${person.displayName}`}
-            style={[styles.connect, connected && styles.connected]}
+            disabled={conn.busy}
+            accessibilityLabel={connected ? `Disconnect from ${person.displayName}` : `${conn.label} ${person.displayName}`}
+            style={[styles.connect, (connected || conn.view === 'requested_by_me') && styles.connected]}
           >
             {connected ? <Check size={15} color={colors.accent} strokeWidth={3} style={{ marginRight: 4 }} /> : null}
-            <T v="subhead" weight="700" color={connected ? colors.accent : colors.white}>
-              {connected ? 'Connected' : 'Connect'}
+            <T v="subhead" weight="700" color={connected || conn.view === 'requested_by_me' ? colors.accent : colors.white}>
+              {conn.label}
             </T>
           </Tap>
           <Tap onPress={() => router.push(`/chat/${person.id}`)} accessibilityLabel={`Chat with ${person.displayName}`} style={styles.chat}>

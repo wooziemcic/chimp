@@ -1,3 +1,1309 @@
+# Chimp build notes — v0.7C — Product Polish, Early Opportunity Intelligence, Push & Build Readiness
+
+2 Oct 2026 · branch `phase-7`.
+
+`master` and the tagged TestFlight Build 4 (`testflight-0.1.0-build4`) are untouched. No commits were made, and no EAS build was started. Migrations 0001–0008 were not modified. The one new migration is `0009_phase7c_product_intelligence.sql`.
+
+> **Status: implemented and tested locally. Not yet run on an iPhone or against your Supabase project.**
+> - **Where it was tested:** a local Postgres with a Supabase stub, Node tests against the real app modules, and a web build in Chromium at the four iPhone sizes.
+> - **Push needs a new EAS build.** It also needs an APNs key on your Expo account and the `push` Edge Function deployed.
+> - **What closes 7C:** the real-phone checklist at the end.
+
+## What you must do once
+
+1. **Supabase → SQL Editor:** run `supabase/migrations/0009_phase7c_product_intelligence.sql`.
+   - It checks that 0008 is there.
+   - It's all-or-nothing and safe to run twice.
+2. **Edge Function `push`:** Dashboard → Edge Functions → Deploy a new function → Via Editor → name it `push` → paste `supabase/functions/push/index.ts` → Deploy.
+3. **Edge Functions → Secrets:**
+   - `PUSH_SECRET`: any long random string. Without it, the function refuses everything.
+   - `EXPO_ACCESS_TOKEN`: strongly recommended. In expo.dev → Account settings → Access tokens, create one. Then in your project's push settings, turn on **Enhanced push security**. After that, only this function can send to Chimp's users. Anyone who somehow learned a device's push token cannot.
+4. **Database → Webhooks → Create** (instant delivery):
+   - Table `public.push_outbox`, event **Insert**, type "Supabase Edge Functions" → `push`, method POST.
+   - Header `x-push-secret: <PUSH_SECRET>`.
+5. **Integrations → Cron** (retries, receipts, clean-up):
+   - Every minute: POST `{"action":"send"}` to `push`.
+   - Every 15 minutes: POST `{"action":"receipts"}`.
+   - Both with the same header.
+6. **APNs key for Expo (once):** `npx eas-cli@latest credentials` → iOS → production → **Push Notifications: set up a key**. You can also accept the prompt during the next `eas build`.
+7. **New EAS build.** I did not start one. It's needed because 7C adds three native modules: `expo-notifications`, `expo-device`, `@react-native-community/netinfo`.
+
+Without step 1, the app still works:
+- Follow / Crush fall back to the old table writes.
+- Analytics switches itself off for the session.
+- Notification settings say "aren't available yet".
+
+---
+
+## 1 · Design system and layout (Parts 1–6)
+
+**One skeleton, two moods.** A single set of layout tokens (`src/theme/layout.ts`) now drives every primary tab. Normal Chimp and After Dark use the same header, the same segmented control and the same bottom bar. Only colour and mood differ (light / blue vs dark / pink). No second design system.
+
+| Token | Value | Token | Value |
+|---|---|---|---|
+| gutter | 16 | segmented height | 38 (padding 3, radius 22) |
+| header top | 6 | header → subtitle | 4 |
+| header → segmented | 12 | section gap | 20 |
+| card padding / radius | 14 / 20 | compact gap | 10 |
+| empty-state padding | 16 | bottom nav | height 64, radius 28, side margin 14 |
+| nav bottom inset | max(safe-area − 8, 10) | scroll space | nav + inset + 14 |
+
+- **`PageHeader`:**
+  - Rebuilt on the tokens.
+  - A `subtitle` slot replaces the free-floating subtitle lines in Buzz and Happening.
+  - A `compact` mode for After Dark: no eyebrow, title1 size, the same gutter and rhythm.
+- **`Segmented`:**
+  - One component with three tones: light (Buzz), dark (over media), night (After Dark).
+  - Same 38-pt height everywhere; per-segment "new" dots.
+  - A tight mode so the five After Dark labels fit at 375 pt. "Challenges" used to clip.
+- **After Dark (Part 2):**
+  - Header: the same compact `PageHeader` with the 18+ mark.
+  - Tabs: the shared `Segmented` (night tone).
+  - Section labels: sentence case instead of all-caps.
+  - Empty states: compact, left-aligned.
+  - **Vibes empty:** "No Vibes yet / Mutual interest becomes a Vibe when both people say yes. / [Discover people]".
+  - **Plans:** the "Plans are private to the two of you. Nobody else sees them." paragraph is gone. Empty state: "No plans yet / Turn an Open Loop into a private plan you both agree on." The plan sheet still says "Only you and {name} see it."
+  - The five tabs (Discover / Vibes / Challenges / Plans / Inbox) are kept.
+- **Buzz card overflow (Part 3), fixed at the root:**
+  - **The cause:** the World chip (and long usernames) had no `minWidth: 0` / `flexShrink`, so a long name pushed the row past the card. It overflowed by up to 132 px at 375 pt.
+  - **The fix:**
+    - The chip row wraps.
+    - Chips, titles and usernames can shrink and truncate.
+    - "Creator" moves to the next line instead of off the card.
+    - Timestamps never shrink.
+  - Applies to all four card variants.
+- **Bottom nav / safe area (Part 4):** one inset rule, and a gradient backdrop behind the floating bar so content never shows around or under it. Every tab's scroll space comes from the same function.
+- **Developer gear (Part 5):**
+  - The blue gear is Expo's dev-menu "Tools" button, not Chimp's ([expo#44234](https://github.com/expo/expo/issues/44234)).
+  - The app can't hide it, and it doesn't exist in TestFlight builds.
+  - Chimp's own developer tools stay in Settings → Graph Debug (developer accounts only).
+- **Responsive (Part 6):** tested at 375×667, 390×844, 393×852 and 430×932 (`l7_layout`, 88/88).
+  - No horizontal page overflow.
+  - Nothing inside a Buzz card renders outside it.
+  - The last item of Buzz, Boards, Happening and You ends above the bar.
+  - Header gutter, segmented height and bar size are identical in Buzz and After Dark.
+  - Long-name fixtures are part of the test: "jordanblackwoodmontgomery_official" and the World "Boston Founders & Builders Collective — Weekly Gathering".
+  - No Android work was done, and nothing here is iOS-only: tokens and the safe-area rule are platform-neutral.
+
+## 2 · Simplification audit (Part 7)
+
+| What | Why | Consequence for people | Done? |
+|---|---|---|---|
+| Plans intro paragraph | Repeated on every visit; the plan sheet already says it | One less paragraph; Plans opens straight on the list | **Yes** |
+| All-caps section labels in After Dark | Shouting, and inconsistent with the rest of Chimp | Calmer, easier to read | **Yes** |
+| Subtitles floating below headers (Buzz, Happening) | Ad-hoc spacing, different per screen | Same rhythm on every tab | **Yes** |
+| "Spark" for a mutual Crush (Happening, profile, You) | Two words for one thing | "Mutual Crush" everywhere. The Vibe *stage* "Spark" is unchanged. | **Yes** |
+| Happening "WHY THIS MATTERS TO YOU" | Read like a feed of reasons | Now "CHANGED IN YOUR WORLD": the few deltas that matter now | **Yes** |
+| **% match on people (MatchCard, profile ring)** | The 7C brief says no invented compatibility percentages. The number is a ranking score, not a measured compatibility. | Recommend replacing it with plain reasons ("You're both in Japan Trip") or a word ("Strong match") | **No — your call** (flagged in the analysis) |
+| `TRENDING.halfLifeHours` (unused) | Trending sorts by likes, then newest; the half-life is dead config | None today. Either use it or delete it. | No (kept; tests rely on Trending's simple rule) |
+| Graph Debug shows the private-Crush signal | Developer-only screen behind the server allow-list | None for users | No |
+| Follow World vs Join World | Different meanings (follow = more of it; join = belong) | Keep both | No |
+
+## 3 · Terminology (Part 8)
+
+| Term | Means | Where it shows |
+|---|---|---|
+| Follow | "I want more of your world" | Profile menu, Worlds |
+| Connect | A mutual social relationship | Profile, requests on You |
+| Crush | Private romantic interest. Nobody is told. | Profile, Discover |
+| Mutual Crush | Both chose each other | Happening, profile, You (was "Spark") |
+| Vibe | An active mutual romantic space (After Dark) | After Dark |
+| Open Loop | Something unresolved you want to happen | You, chats, Discover prompt |
+| Plan | An Open Loop made concrete (when / where) | After Dark → Plans |
+
+## 4 · Opportunity intelligence (Parts 9–15)
+
+**Not** Opportunity Graph v2: no GNN / TGAT / TGN / GraphSAGE / LightGCN, no training pipeline, no reinforcement learning, no monetization.
+
+### Decomposed signals
+
+Every ranked thing is scored from the same signals (`src/graph/signals.ts`), each 0..1:
+
+```
+opportunity = 100 × Σ weight × signal − repetition × 10 − saturation × 20 (− the existing dislike penalty)
+```
+
+| Signal | Means | People | Buzz For You | Happening | Discover |
+|---|---|---|---|---|---|
+| relevance | fits who you are | 0.50 (the match) | 0.34 | 0.30 | 0.40 |
+| relationship | ties you already have | 0.12 | 0.24 | 0.15 | 0.20 |
+| timing | relevant now | 0.12 | 0.18 | 0.25 | 0.10 |
+| intent | what you said you want | 0.10 | 0.08 | 0.15 | 0.15 |
+| actionability | something concrete to do | 0.08 | 0.06 | 0.08 | 0.05 |
+| novelty | new to you | 0.05 | 0.06 | 0.05 | 0.08 |
+| confidence | how much evidence | 0.03 | 0.04 | 0.02 | 0.02 |
+
+- **Safety** is a gate, not a weight: unsafe means never ranked. Blocked people and After Dark content in normal surfaces are already filtered out.
+- **Where the settings live:** weights, half-lives and penalties are in `src/graph/config.ts` (`SIGNALS`, `DECAY`, `MOMENTUM`, `EXPOSURE`). They're explicit and editable.
+- **Graph Debug** shows each item's breakdown, for example "62.5 = relevance 0.53 · timing 0.50 · …", and the last Happening selections.
+- **Nothing numeric is ever shown to people.** No score, no percentage, no raw parts.
+
+### Time (Part 11)
+
+- **Static interest stays as it was.** Affinity never decays.
+- **Timing is a separate signal** (`src/graph/time.ts`). Each kind of action has its own half-life:
+  - open 24 h · like 3 days · save 14 days · join 30 days · connect 60 days · Open Loop 30 days.
+- **Momentum** is the decayed sum of *recent* affinity gains per interest ("Japan is becoming relevant now").
+  - It is capped at a 4-day half-life, so it measures this week, not this month.
+  - The same Japan saves two months ago give ≈0 momentum.
+- **A Buzz post's own timing** halves every 24 h. This replaces the old linear 36-hour ramp.
+
+### Repetition and saturation (Part 12)
+
+- **What's counted:** exposure is counted per **sitting** (impressions closer than 30 minutes are one sitting). It's stored locally per account (`src/store/useExposure.ts`), never uploaded, and reset on sign-out.
+- **Snapshots:** rankings read a snapshot taken when a sitting starts (launch, account change, back to the app). The current sitting never counts, so a list never reshuffles while you scroll.
+- **Repetition:** you saw it in an earlier sitting and didn't act. It fades with a 24-hour half-life.
+- **Saturation:** it starts at 3 sittings without acting and is full at 7.
+- **Strong intent cancels 75% of saturation.** You saved it, joined its World, or opened a loop on it, so relevance can recover.
+- **Acting clears both.** If you acted on something after you last saw it, it was useful, not noise.
+
+### Surfaces
+
+- **People suggestions** (You, People, Pulse, Happening):
+  - **How they're scored:** the match score is the relevance; timing, intent, actionability, novelty and exposure decide between similar matches.
+  - **How much the order moved:** in tests, the top 3 always come from the 8 best matches, and the best match stays in the top 3.
+  - **Private Crush:**
+    - It still adds a silent 1-point nudge.
+    - It is never a reason, a label, a field or an event.
+    - Tested: nothing anywhere mentions it.
+- **Buzz For You:**
+  - **Reordered by the signals:** relevance and relationship come from the existing graph parts; timing comes from age and momentum; dislikes stay a penalty.
+  - **Unchanged:** Following (newest first), Trending (likes, then newest) and Buzz → Drift (its own interleave).
+- **Happening → "Changed in your world"** (Part 14):
+  - **What's ranked:** the same high-context items as before (loops that moved, plans this week, people who now overlap a loop, mutual Crushes, World Delta changes), ranked by the Happening weights.
+  - **What's recorded:** each selected item stores why it was chosen (its signals and its pre-7C score), and the last 40 selections are logged locally for Graph Debug.
+  - Happening still never shows Buzz or Drift posts, so it isn't a feed.
+- **After Dark Discover:**
+  - **How it's ranked:** by shared Worlds, shared interests, mutual connections, intent fit (both visible on the cards), timing and "not already seen", ranked once per load so cards don't jump.
+  - **What is never used:** your private Crushes and passes.
+- **"Why you may vibe"** (Part 13): at most three plain reasons, strongest first, built only from what both people already see on each other's cards.
+  - Shared Worlds, shared interests, mutual connections, or the same intent ("You're both up for something casual").
+  - Never a number, a Crush, or an inference.
+  - If nothing is shared, no reasons are shown (no filler).
+
+### Reversible (Part 15)
+
+`INTELLIGENCE` in `config.ts` has one switch per surface: `people`, `buzzForYou`, `happening`, `discover`. Turning one off restores the pre-7C order exactly. This is tested for people and Happening.
+
+### Fixtures (Part 31)
+
+All in `i7.ts`, 45/45:
+- **A** = Travel / Japan / Japan Trip World / recent planning; **X** = a Japan Trip post from 3 h ago; **Y** = a 10-day-old Vintage post.
+- Score(A, X) = 63.7 > Score(A, Y) = 13.8. X also wins on relevance, timing and intent separately.
+- **Ageing:** timing goes 0.98 > 0.78 > 0.63 > 0.34 > 0.25 at 1 / 12 / 24 / 72 / 240 h, and the total falls with it.
+- **Repeated exposure:** saturation goes 0 · 0 · 0.2 · 0.4 · 0.6 · 0.8 · 1 · 1 over 1–9 sittings. The same X drops from 63.7 to 46.1 after many sittings.
+- **Strong intent:** a saturated item with strong intent scores 62.6 against 54.6 without it.
+
+### Performance (Part 30)
+
+Measured in Node on the Demo data, including a full graph rebuild:
+
+| | People ranking | Buzz For You | Happening |
+|---|---|---|---|
+| With 7C signals | 1.8 ms | 3.3 ms | 4.1 ms |
+| Without | 0.6 ms | 2.3 ms | 3.2 ms |
+
+- Momentum is computed once per graph context.
+- The exposure snapshot is a plain object read.
+- Impressions are written at most once per minute per item, and once per sitting.
+
+## 5 · Instrumentation (Parts 16–17)
+
+**Migration 0009 → `product_events`**:
+- **Columns:** `event_id`, `user_id`, `event_type`, `family`, `target_type`, `target_id`, `source_surface`, `created_at` (**server time**), `client_at` (the phone's, kept apart), `session_id`, `context`.
+- **Families:** content, people, worlds, messaging, after_dark, plans, outcome, app.
+- **Writing:** only through `log_product_events(jsonb)`:
+  - Each event is checked against an allow-list of event types, target types and id formats.
+  - At most 50 events per call and 1,200 per person per hour.
+  - Invalid items are dropped, not the whole batch.
+- **Reading:** the app can't read, edit or delete events. RLS is on with no policies; only the server key can read them.
+- **Retention:** `purge_old_product_events()` keeps 180 days. It runs with the receipts cron.
+
+**Never stored:**
+- **Content and credentials:** message text, captions, comments, prompts, answers, OTPs, tokens, JWTs, email or phone, media URLs or paths, report text.
+- **Private targets:**
+  - Who you have a Crush on: `crush_set` / `crush_remove` keep no target.
+  - Who you passed on or looked at in After Dark: After Dark person targets are dropped.
+  - Which message: a message is counted, never identified.
+- **How it's enforced:**
+  - Context keeps short scalar values only.
+  - Keys like body / text / url / token / email / name are dropped, and so are id-shaped values.
+  - Both the phone and the server apply these rules.
+
+**The client** (`src/services/analytics.ts`):
+- REAL accounts only. The Demo, the App Review Demo and signed-out states send nothing (tested).
+- Sends in batches: every 10 s, at 20 events, or when the app goes to the background. Queued events are flushed on sign-out.
+- A new session id for every sign-in, so two accounts are never linked.
+- **Events come from three places:**
+  - The local action log (`track`): views, likes, saves, joins, follows, connects, loops, blocks.
+  - The chat store: `message_sent` with `kind` and `view_once` only.
+  - After Dark actions: pass, Vibe request / accept / decline / pause / close (with the reason category only), challenge send / answer, photo-consent change.
+  - Plus `app_open`, `app_foreground` and `push_opened`.
+
+## 6 · Follow / Crush intents (Part 18)
+
+- **The server functions:**
+  - `set_follow(other, on)` returns whether you follow them afterwards.
+  - `set_crush(other, on)` returns `{crush, mutual}`. `mutual` is true only when they chose you too, which `my_sparks()` already reveals; a one-way Crush tells nobody anything.
+  - A repeat tap changes nothing.
+  - Blocked and "no such person" give the same "Not available." Blocks aren't revealed.
+- **Older app versions** (Build 4) still write the tables directly. A new trigger quietly drops a follow or Crush across a block, with no error to probe with.
+- **On the phone:** taps become explicit on/off intents, sent one at a time per person, in tap order, so the server ends where the last tap left it. A failure puts the switch back only if no newer tap is waiting. They count as relationship writes, so the 7B reconcile can't flicker them.
+- **Unchanged:** Mutual Crush events (0008), Crush privacy and RLS.
+
+## 7 · Push notifications (Parts 19–25)
+
+```
+message / user_event  →  trigger (0009)  →  push_outbox  →  Database Webhook + cron  →  Edge Function `push`  →  Expo  →  APNs  →  iPhone
+```
+
+- **No phone ever sends a push.** No privileged key is in the app.
+  - The database queues notifications from new messages and from `user_events` (0008).
+  - The Edge Function only sends rows the database wrote. Even with its secret, nobody can make it send arbitrary text.
+- **Event types:** MESSAGE_RECEIVED, AFTER_DARK_MESSAGE, CONNECTION_REQUEST, CONNECTION_ACCEPTED, MUTUAL_CRUSH, VIBE_REQUEST, VIBE_ACCEPTED, CHALLENGE_YOUR_TURN, PLAN_WAITING_FOR_YOU.
+
+**What a notification says (Part 21):**
+
+| Event | Lock screen |
+|---|---|
+| Message (1:1) | "Alex sent you a message" — never the text |
+| Message request | "Alex sent you a message request" |
+| Group | "Trip crew" · "Alex sent a message" |
+| Burst (within 30 s) | "Alex sent you 3 messages" (one notification) |
+| Connection request / accepted | "Alex wants to connect" / "Alex accepted your connection" |
+| After Dark message | "New After Dark message" |
+| Mutual Crush | "Something new is waiting for you" |
+| Vibe request / accepted | "Someone sent you a Vibe request" / "Your Vibe request was accepted" |
+| Challenge / Plan | "A challenge is waiting for you" / "A plan is waiting for you" |
+
+- **After Dark is fully generic:** never a name, a Crush, a challenge or plan's content, a view-once, or anything romantic or sexual. Even the hidden payload is neutral: kind `after_dark` and a tab.
+- **Names are cleaned:** control characters are stripped and lengths are capped.
+
+**Reliability (Parts 22–24):**
+- **One push per message per recipient:** a unique dedupe key, `message:<id>:<recipient>`.
+- **No double sends:** claims use `for update skip locked`.
+- **Bursts:** message pushes wait 2 s so a burst becomes one notification. The function waits that out in the same run.
+- **Retries:** 429 / 5xx / MessageRateExceeded back off (15 s, 30 s, … up to 1 h). After 5 attempts the push is marked failed. A worker that died mid-send is reclaimed after 5 minutes.
+- **Dead tokens:** DeviceNotRegistered, from tickets or from receipts 15 minutes later, deletes the token.
+- **Rechecked just before sending:** block, preference, still a member of the chat, message unsent (a burst survives if any of it is left), more than 24 h late.
+- **Relationship toggles are throttled:** request / cancel / request gives one "wants to connect" per hour. A Mutual Crush notifies once per day per pair.
+- **A push problem can never block the action.** Every push step is wrapped: a failure is logged as a warning and the message or relationship change goes through. Tested by breaking a setting on purpose.
+
+**Tokens (Part 22):**
+- **Registration:** `register_push_token` stores one row per device, with a random per-install id.
+  - A new token for the same install replaces the old one.
+  - A phone that signs into another account moves its token to that account.
+  - Ten devices maximum per person.
+- **Sign-out:** the phone removes its token while the session is still valid.
+- **Account deletion:** tokens cascade away.
+- **If the phone couldn't unregister** (offline, revoked session): each token remembers the sign-in session that registered it, and the server stops sending once that session no longer exists.
+- **Foreground:** a notification for another account isn't shown, and neither is one for the chat you're reading.
+- **RLS:** you see only your own tokens, and there's no direct write.
+
+**Taps (Part 24):**
+- **Waiting for the app to be ready:** a tap is held until the session is restored, the right account is signed in and chat has started (up to 6 s). Then it opens:
+  - the chat, the group, the Vibe, the challenge, After Dark → Inbox / Vibes / Plans, or the person's profile.
+- **This includes the tap that launched the app** (`getLastNotificationResponse`).
+- **Ignored:** taps meant for a different account, and taps while the Demo is open.
+- **Only safe routes:** routes are built from UUID-checked ids on fixed paths, so a payload can't steer the app anywhere else.
+
+**Settings → Notifications (Part 25):**
+- **Three switches:** Messages, Connections, After Dark. They're stored on the server, so they apply to all your phones.
+- **Shows the iOS permission state:** a "Turn on notifications" button, or "Notifications are off → Open" iOS Settings.
+- **Asking for permission:** once, about 2.5 s after the first screen, for signed-in REAL accounts only.
+- **Never:** the Demo, the App Review Demo, the web build or simulators register anything.
+
+## 8 · Offline indicator (Part 26)
+
+- **What it looks like:** a small "Offline" pill under the status bar. It's REAL mode only.
+- **Never in the way:** it never blocks a tap, and it appears only after 1.5 s offline.
+- **When it shows:** it uses NetInfo's `isConnected` only. "Internet reachable" comes from a probe to a fixed URL that some networks block, and the pill must never cry wolf.
+- **Sends still work offline:** they queue and retry by themselves (7B).
+- **EAS:** NetInfo is a native module. Expo Go bundles it, but Build 4 doesn't, so the new build is required.
+
+## 9 · Native requirements (Part 27)
+
+| Package | Version | Why | Native? |
+|---|---|---|---|
+| `expo-notifications` | ~57.0.21 | permission, Expo push token, taps, foreground handling | yes (config plugin added to `app.json`) |
+| `expo-device` | ~57.0.2 | register real devices only (no simulators) | yes |
+| `@react-native-community/netinfo` | 12.0.1 | offline pill | yes |
+
+- **Versions:** all installed with `expo install`, at the SDK 57 versions.
+- **`app.json`:** adds the `expo-notifications` plugin (Android accent colour). The iOS entitlement it writes is `aps-environment: development`. Xcode's App Store / TestFlight export switches it to production from the distribution profile. Check this on the first TestFlight build, using the real-phone checklist.
+- **No `UIBackgroundModes`:** no silent pushes are used.
+- **Build:** `npx eas-cli@latest build --platform ios --profile production` (not started).
+
+## 10 · Business model readiness (Part 28)
+
+- **No monetization.** Product events have families and an `outcome` family, so organic, sponsored and transactional can be told apart later. There is no sponsored content and no paid boosts.
+- **No pay-to-win dating:** Discover ranking takes no payment input, and none is planned.
+
+## 11 · App Review Demo (Part 29)
+
+Unchanged and still fully local:
+- **No network:** zero Supabase calls (31/31), no analytics, no push registration, no NetInfo pill.
+- Deterministic and usable without an OTP.
+
+## 12 · Independent security review
+
+A separate reviewer audited 0009, the Edge Function and the client. **No Critical findings.** All of the following were fixed and re-tested:
+
+| # | Finding | Fix |
+|---|---|---|
+| H1 | A failing push step could roll back the user's message or relationship change | Every push step is wrapped and logs a warning instead (test R2) |
+| M1 | An instant webhook defeated coalescing; claim clean-up could queue on locks | 2 s message delay, the function waits it out; all clean-up uses skip-locked; no extra dedupe rows |
+| M2 | A sign-out with a dead session left the phone getting pushes | Session-bound tokens (R6/R7); foreground suppression for other accounts |
+| M3 | Toggling requests / Crushes could spam pushes | Throttled dedupe keys (R8) |
+| M4 | The device-id replacement wasn't scoped to the owner | Scoped to your own tokens. Enhanced push security is now strongly recommended. |
+| L1 | Receipts were marked checked even when the fetch failed | Only fetched rows are marked |
+| L2 / L3 / L4 | Stale reclaim ignored the attempt limit; late or ex-member pushes went out; unsending the last message dropped a burst | Fixed (R3–R5) |
+| L5 | After Dark kinds were visible in the hidden payload | Neutral `after_dark` |
+| L6 | Context could hold id-shaped strings; session id spanned accounts | Rejected (R12); new id per sign-in |
+| L7 | Old-app direct writes bypassed blocks; block vs "nobody" errors differed; null `on` | Silent guard trigger (R9); same error (R10); explicit on/off (R11) |
+| L8 | Control characters in names reached the lock screen | Stripped |
+
+**Not changed:** `collapse_key` is not sent to Expo. Bursts are coalesced on the server instead.
+
+## Files
+
+**New:**
+- **Ranking:** `src/theme/layout.ts`, `src/graph/{signals,time,vibe}.ts`, `src/store/useExposure.ts`, `src/hooks/useImpression.ts`
+- **Analytics and push:** `src/services/{analytics,push,pushRoutes}.ts`
+- **UI:** `src/components/OfflineBanner.tsx`, `src/components/settings/NotificationSettings.tsx`
+- **Server:** `supabase/migrations/0009_phase7c_product_intelligence.sql`, `supabase/functions/push/index.ts`
+
+**Changed:**
+- **Layout and UI:**
+  - `PageHeader`, `Segmented`, `TabBar`, `useLayout`, `BuzzCard`
+  - After Dark `AfterDarkHome`, `VibeParts`, `VibesTab`, `PlansTab`, `InboxTab`, `ChallengesTab`, `DiscoverTab` (ranking + safe reasons + impressions)
+  - `buzz.tsx`, `happening.tsx` ("Changed in your world"), `settings.tsx` (Notifications), `MatchCard` (impressions), `graph-debug.tsx` (7C signals)
+- **Ranking:** `relevance.ts` (people opportunity), `surfaces.ts` (Buzz For You, Happening selection), `config.ts`
+- **App wiring and stores:**
+  - `_layout.tsx` (push handling, registration, deep links, sittings, offline pill)
+  - `useChimp` (intents, events), `useChat` / `useAfterDark` (events)
+  - `useSession` (sign-out: unregister + flush + exposure reset)
+- **Backend client:** `content.ts` (`set_follow` / `set_crush` with fallback)
+- **Terminology:** `surfaces.ts`, `profile/[id].tsx`, `YouParts.tsx`
+- **Config:** `app.json`, `package.json`
+
+## Tested locally
+
+| Suite | Result |
+|---|---|
+| TypeScript · ESLint | clean · clean (no new suppressions) |
+| DB · 0009 suite: analytics, tokens, prefs, push text / dedupe / coalescing / generic After Dark / claims / retries / receipts / dead tokens / session-bound tokens / throttling / intents / block guard / cascade, plus review regressions R1–R12 | **96 / 96** |
+| DB · 0008 + consent suite with 0009 applied | 122 / 122 |
+| DB · messaging 113/113 · chat 35/35 · 6D 62/62. Older suites (7A, RLS 6D, delete World) give identical results with or without 0009. | pass |
+| Node · intelligence fixtures `i7` | **45 / 45** |
+| Node · `push` Edge Function (messages per device, tickets, dead tokens, retries, receipts, 2 s delay, auth gate, neutral After Dark payload) | **30 / 30** |
+| Node · client privacy (tap routing, no path steering, analytics wire format, Demo sends nothing) | **24 / 24** |
+| Node · 7A 90/90 · 6C 56/56 · Two Truths 14/14 · messaging 38/38 · 7B 55/55 · consent 19/19 | pass |
+| Web · layout at 4 sizes `l7_layout` | **88 / 88** |
+| Web · 7C REAL account `c7_web` (notification settings, set_follow, events carry no text, offline pill, "Changed in your world") | **18 / 18** |
+| Web · After Dark `ad7_test` 390 / 375 · sweep · REAL without 0007 | 56/56 · 56/56 · 12/12 · 6/6 |
+| Web · App Review Demo (zero Supabase calls) | 31 / 31 |
+| Web · consent `ph_web` · 7B `b7_web` · Two Truths `tt7_web` | 36/36 · 23/23 · 10/10 |
+| Web · messaging `chat_test_6d` · groups `m7_test` | 38/38 · 80/80 |
+| Web · 6C `c6_test_6d` (dev build; A4 reads dev-only startup marks) · 6D `d6_test` · avatars · delete World · 6C regressions | 69/69 · 72/72 · 15/15 · 29/29 · 33/33 |
+| Web · account cycle (sign in / out / Demo, repeated) · Demo route sweep (every route) | completed, 0 page errors · 0 errors |
+
+**Not tested anywhere yet:**
+- A real push: Expo → APNs → iPhone.
+- The iOS permission prompt.
+- Cold-start taps.
+- Your Supabase project's webhook, cron and `auth.sessions`.
+- Two phones.
+
+## Real-phone checklist (closes 7C)
+
+1. **Install:** the new build on two iPhones (A, B), both signed in. Allow notifications when asked.
+2. **Message pushes:**
+   - B locks the phone; A sends "hi" → B gets "A sent you a message" (no text). One notification, not two.
+   - A sends three quick messages → one "sent you 3 messages".
+   - Tap it → that chat opens, from the lock screen and from a fully closed app.
+3. **Already reading:** B is in that chat → no banner.
+4. **After Dark:**
+   - In a Vibe, A sends a message → "New After Dark message".
+   - Challenge → "A challenge is waiting for you"; plan → "A plan is waiting for you".
+   - Each tap opens the right place.
+5. **Relationships:**
+   - Connection request → "A wants to connect"; request / cancel / request → still one.
+   - Mutual Crush → both get "Something new is waiting for you".
+6. **Settings:**
+   - Turn Messages off on B → no message pushes; After Dark still works.
+   - Turn After Dark off → none from After Dark.
+7. **Sign-out and deletion:**
+   - B signs out → no more pushes to B's phone.
+   - Sign B in on A's phone → A's pushes stop on that phone and B's arrive.
+   - Delete a test account → its devices stop.
+8. **Dead token:** uninstall the app on one phone → the next push removes that token (`push_tokens` row gone after the send or receipt check).
+9. **Offline:** Airplane mode → the "Offline" pill appears; back online → it goes.
+10. **Layout:** on both phones, Buzz with long names stays inside the cards; After Dark matches Buzz's header and tabs; nothing hides behind the bar.
+11. **Analytics:** in SQL, `select event_type, target_type, target_id, context from product_events order by created_at desc limit 50;` → no text, no Crush target, no URLs.
+
+## Final status
+
+| FEATURE | STATUS | LOCAL TEST | REAL SUPABASE | REAL IPHONE | TWO PHONE | NEEDS NEW EAS BUILD | READY FOR TESTFLIGHT |
+|---|---|---|---|---|---|---|---|
+| Shared layout tokens / one skeleton | Done | Yes (88/88, 4 sizes) | n/a | No | n/a | Yes | Yes, after a visual check |
+| After Dark header / tabs / empty states | Done | Yes (ad7 56/56 ×2, l7) | n/a | No | n/a | Yes | Yes, after a visual check |
+| Buzz card overflow | Fixed (root cause) | Yes (l7; the old card fails the test) | n/a | No | n/a | Yes | Yes |
+| Bottom nav / safe area | Done | Yes (l7) | n/a | No | n/a | Yes | Yes, after a visual check |
+| Developer gear | Explained (Expo's; absent in TestFlight) | n/a | n/a | No | n/a | No | Yes |
+| Terminology (Mutual Crush etc.) | Done | Yes | n/a | No | n/a | Yes | Yes |
+| % match on people | **Not changed — your decision** | n/a | n/a | n/a | n/a | — | — |
+| Decomposed signals, time decay, momentum | Done | Yes (i7 45/45) | n/a (local) | No | n/a | Yes | Yes |
+| Repetition / saturation (per sitting) | Done | Yes (i7) | n/a (local) | No | n/a | Yes | Yes |
+| Why you may vibe (safe, ≤3, no %) | Done | Yes (i7, ad7) | No | No | No | Yes | Yes |
+| Happening "Changed in your world" | Done (reversible, stored selection) | Yes (i7, c7_web) | n/a | No | n/a | Yes | Yes |
+| Product events (0009) | Done | Yes (DB 96/96, Node, web) | **No** | No | n/a | Yes | After 0009 is run |
+| Follow / Crush intents | Done (+ fallback) | Yes (DB, web) | **No** | No | No | Yes | After 0009 is run |
+| Push: tokens, prefs, outbox, triggers | Done | Yes (DB) | **No** | No | No | Yes | After 0009 + function + webhook + cron |
+| Push: Edge Function (Expo → APNs) | Done | Yes (Node 30/30, fake Expo) | **No** | **No** | **No** | n/a (server) | After deploy + APNs key |
+| Push: deep links, foreground, settings | Done | Yes (Node routing 24/24, web settings) | No | **No** | **No** | **Yes** | After the phone checklist |
+| Offline indicator (NetInfo) | Done | Yes (web) | n/a | No | n/a | **Yes** | Yes |
+| App Review Demo (local, zero network) | Unchanged | Yes (31/31) | n/a | No | n/a | Yes | Yes |
+| Security review H1, M1–M4, L1–L8 | All fixed + tests | Yes | No | No | No | Partly (client) | Yes |
+
+**7C is complete in code. It is proven only locally. It closes when the real-phone checklist passes on the new EAS build against your Supabase project.**
+
+
+# Chimp build notes — v0.7B — Reliability, Realtime, Security & Logic Hardening
+
+2 Oct 2026 · branch `phase-7`.
+
+`master` and the tagged TestFlight Build 4 (`testflight-0.1.0-build4`) are untouched. No commits were made, and no EAS build was started. Everything is in the `phase-7` working tree. Migrations 0001–0007 were not modified.
+
+**Goal:** Chimp should behave reliably across real devices and real accounts. This phase fixes the three reported bugs at their root, then applies the same pattern everywhere shared state lives. There is no UI redesign; that is deferred to 7C.
+
+> **Status: implemented and tested locally. Not yet proven on two phones against your Supabase project.** Everything here ran against a local Postgres (with a Supabase stub) and a multi-user web mock of Supabase. Nothing ran on an iPhone or on your project. The two-phone script at the end is what closes Phase 7B.
+
+## Phase 7B patch — After Dark photo / view-once consent (2 Oct 2026)
+
+**Report:** in a Vibe, the action sheet showed Challenge / Plan / Photo / View-once photo, and Photo and View-once couldn't be sent. Both share one path and one consent rule, so they had the same problem.
+
+### Root cause
+
+| | Finding | Verdict |
+|---|---|---|
+| A | **Photos are off by default.** `vibe_members.allows_photos` defaults to `false` (0007, by design). Until the *recipient* turns on "What Maya can send you → Photos", neither a photo nor a view-once photo may be sent. | Expected, and the most likely situation on your phones |
+| B | **The UI made it look broken.** Photo and View-once looked like normal, active rows. Tapping one closed the sheet and put a small red line above the composer ("… hasn't turned on photos"), which is easy to miss and reads as an error. | UX bug: fixed |
+| G | **When photos *were* allowed, the picker opened while the sheet was still sliding away.** iOS can't present the photo picker on top of a modal that is mid-dismissal; the picker silently doesn't appear. | Fixed defensively (can't be confirmed without an iPhone) |
+| B | **Stale consent.** The sheet trusted the Vibe as the screen had loaded it, and there was no fresh server check before picking. | Fixed |
+| G | **Failure handling:** a refused or failed photo showed only "Not sent". The upload of a refused photo was left behind, and a retry uploaded the file again. "Upload failed: …" was misread as "offline" (`kindOf` matched "load failed" inside "upload failed"). | Fixed |
+| G | **The Controls sheet caption described the wrong person's setting** (what *you* may send *them*, worded as what *they* may send *you*). | Fixed |
+| C/D/E/F | Upload paths, message types, media-kind validation, RLS and view-once (7B) all behave correctly. The server refuses exactly what consent forbids. | No bug |
+
+Not changed: consent stays recipient-controlled, RLS is untouched, there's no new media path (view-once still uses 7B's private bucket and server function), and no migration.
+
+### How consent is enforced (three layers)
+
+1. **Database (unchanged, authoritative).** 0007's "messages send" policy calls `vibe_can_send(conversation, type, view_once)`. A photo or view-once photo needs the **other member's** `allows_photos`, an **active** Vibe and **no block**.
+   - Only you can change your own switch (`set_vibe_controls` updates your row only).
+   - Disguising a photo as text or voice is refused by 0007's media-kind guard.
+   - Newly tested: PH1–PH10.
+2. **Client service layer.** Before opening the picker, the app asks the server the same question (`rpc vibe_can_send`, new `canSendInVibe` / `useAfterDark.canSend`). The Demo uses its own mirror of the rule.
+   - "No" → the app re-reads the Vibe and says "Photos aren't enabled for this Vibe yet." (or "This Vibe is no longer active.").
+   - Can't tell (offline) → the database still decides when the message is sent.
+3. **UI.** When the other person hasn't enabled photos, **Photo** and **View-once photo** stay visible but **Locked**: dimmed, dashed border, a lock pill, and they can't be tapped.
+   - One calm line under them: "Leah hasn't enabled photos yet. Leah decides whether photos can be sent to them."
+   - Challenge and Plan are unaffected. There's no "request access" feature (none existed); people can simply ask in the chat.
+
+### Live consent updates
+
+`set_vibe_controls` touches the Vibe row, which the After Dark Realtime channel already listens to. The sender's Vibe reloads within about half a second, and the open sheet re-renders: Locked ⇄ active.
+
+Opening the sheet also re-reads the Vibe, and coming back to the app re-reads it (7B's foreground reconcile). So even if Realtime is asleep, the sheet never shows stale consent. The server check before picking is the final guard.
+
+### Sending and failing
+
+- **Order:** pick (cancel = nothing happens, no message) → upload → send. If the message is refused (consent changed mid-upload, the Vibe ended or paused, a block), the uploaded file is **removed** and the bubble says why.
+- **Failed bubbles** show a plain reason above "Not sent · Tap to retry":
+  - "You're offline. Try again when you're connected."
+  - "This Vibe is no longer active."
+  - "Photos aren't enabled for this Vibe yet."
+  - "Couldn't send the photo. Try again."
+- Never an RLS, Postgres or storage message.
+- A failed view-once bubble says "Not sent", not "Not opened yet".
+- **Retry after a network drop reuses the already-uploaded file** (no second upload). After a refusal, it uploads again only if consent now allows it.
+- **View-once:** unchanged 7B design (private bucket, server-only open, once, Opened shown to the sender). The row is Locked with "View-once isn't set up on the server yet." if the `view-once` function isn't deployed.
+
+### Layout (this sheet only; no global After Dark restyle)
+
+- The four tray rows share one height (60 pt), locked or not, with the same padding, gaps and text alignment.
+- Helper text wraps (no clipping); labels truncate on one line.
+- The sheet keeps its safe-area bottom padding.
+- Tested at iPhone 12 (390×844) and 15 Pro Max (430×932): nothing overflows or clips, and the composer stays above the bottom edge.
+
+### The blue developer gear
+
+It isn't Chimp's code. It's the Expo dev-menu **Tools** floating button that Expo Go (and expo-dev-client) draws above every app ([expo#44234](https://github.com/expo/expo/issues/44234)).
+
+- The app can't move or hide it, and Expo currently has no setting to hide it.
+- It does **not** exist in TestFlight or App Store builds.
+- Chimp's own developer tools remain in Settings → Graph Debug (server allow-list), so nothing was removed.
+
+### Files changed
+
+- `src/components/afterdark/v2/VibeChat.tsx`: locked rows, server check before picking, picker after the sheet is dismissed, plain failure reasons, equal row heights.
+- `src/components/afterdark/v2/VibeParts.tsx`: `ChoiceRow` gets a `locked` state and `style`; `DarkSheet` gets `onDismissed`.
+- `src/components/afterdark/v2/DisconnectSheets.tsx`: correct Controls caption; plain error text.
+- `src/store/useChat.ts`: `failKind` (offline / refused / other); reuse an uploaded file on retry; remove the upload of a refused message.
+- `src/store/useAfterDark.ts`, `src/services/backend/afterDark.ts`, `src/services/afterDarkApi.ts`: `canSend` → `vibe_can_send`.
+- `src/services/demoAfterDark.ts`: the Demo mirror of `canSend`, plus a test hook for the partner's switch.
+- `src/services/backend/errors.ts`: "Upload failed" is no longer read as offline.
+
+### Tests
+
+| Suite | Result |
+|---|---|
+| TypeScript · ESLint | clean · clean (no suppressions) |
+| DB · 0008 suite + consent PH1–PH10 (off: photo, view-once and disguised refused; the sender can't flip the recipient's switch; text unaffected; on: both allowed and delivered; paused: nothing) | **122 / 122** |
+| Node · consent `p7.ts` (Demo backend + stores) | **19 / 19** |
+| Web · consent `ph_web.py` at 390×844 and 430×932 (locked rows and note; no picker on locked; unlocked: picker opens after the sheet closes; photo sent; view-once sent; cancel sends nothing; no overflow or clip; equal heights; composer visible; zero Supabase calls) | **36 / 36** |
+| Web · After Dark `ad7_test` (390 / 375 wide) · sweep · REAL-without-0007 · App Review Demo | 56/56 · 56/56 · 12/12 · 6/6 · 31/31 |
+| Web · 7B two accounts `b7_web` · Two Truths `tt7_web` | 23/23 · 10/10 |
+| Web · messaging `chat_test_6d` · group `m7_test` · 6C `c6_test_6d` | 38/38 · 80/80 · 69/69 |
+| Node · 7A 90/90 · messaging 38/38 · 6C 56/56 · 7B 55/55 · Two Truths 14/14 | all pass |
+
+**Covered by the 7B suites (unchanged):** view-once open once / second open refused / sender can't open / blocked / ended / paused / expired, no URL to reuse, and sender sees "Opened". See O1–O19 and Z8–Z11.
+
+### Still needs two real phones
+
+1. **iPhone:**
+   - **Photo:** tap Photo → the picker appears (the dismissal timing).
+   - **View-once:** same as Photo, plus Opened on the sender's phone once the other person opens it.
+2. **Consent changes:**
+   - **B turns photos ON** while A has the sheet open → A's rows unlock within about a second.
+   - **B turns them OFF** → A's rows lock, and a photo already being picked is refused with the plain message.
+3. **Interruptions during an upload:**
+   - **Vibe ended** → "This Vibe is no longer active."
+   - **Block** → refused (the upload is removed).
+   - **Airplane mode** → "You're offline…", then the retry sends without uploading again.
+4. **Server setup:** view-once needs 0008 applied and the `view-once` function deployed on your project.
+
+## What you must do once
+
+1. **Supabase → SQL Editor:** run `supabase/migrations/0008_phase7b_reliability.sql`.
+   - Run it **after 0007**. It checks for 0007 first.
+   - It runs in a single transaction, so a failure changes nothing.
+   - It is idempotent; running it twice is safe.
+   - **Never re-run 0001–0007 after it.**
+2. **Supabase → Edge Functions:**
+   - Deploy the new `view-once` function (`supabase/functions/view-once/index.ts`).
+   - Redeploy `delete-account`: it now also removes After Dark card photos and private view-once files.
+   - The header comment of each file has the steps.
+3. **Optional but recommended: scheduled cleanup.**
+   - Set an Edge Function secret `CRON_SECRET`.
+   - Schedule a daily `POST {"action":"sweep"}` to `view-once` with the header `x-cron-secret: <secret>` (Integrations → Cron, or any scheduler).
+   - The sweep deletes:
+     - opened files that weren't deleted on the spot;
+     - unsent or unopened files older than 14 days;
+     - files in Vibes that ended or were blocked;
+     - private files that nothing references.
+   - It also expires stale Vibe requests and old events.
+   - Without it, expiry still happens whenever either person opens After Dark.
+4. **Realtime:** 0008 adds `user_events` to the `supabase_realtime` publication. Check it in Database → Publications.
+5. **No new native modules.** The 7B changes are JavaScript only. TestFlight still needs a new EAS build, because 7A added `expo-audio` and Build 4 never receives OTA JavaScript.
+
+## The three reported bugs: root causes and fixes
+
+### 1. "No page found": a brand-new profile didn't open
+
+- **Root cause:**
+  - `/profile/[id]` looked the person up only in the phone's loaded world. People enter that world through content, World memberships and connections, so an account created minutes ago was never in it, and the screen decided "not found" from a local snapshot.
+  - Search was also local only, so the new person couldn't be found.
+- **Fix:**
+  - A profile is never declared missing from the local snapshot. `usePeople.ensure(id)` fetches the person and adds them to the dataset (`realData.addPeople`).
+  - Loading states:
+    - **Loading…** while the first fetch runs.
+    - **Still loading…** while retrying.
+    - A missing profile is retried 3 times (0.6 s, 1.2 s, 2.4 s), because a new profile can briefly lag behind its id.
+    - Transient failures are retried 3 times.
+  - End states:
+    - **"This profile isn't available"** only after the server confirms the profile doesn't exist.
+    - **"Couldn't load … profile"** with **Retry** / **Go back** when offline.
+  - Concurrent opens share one fetch.
+  - A profile older than 60 s is re-fetched when the screen regains focus (stale cache).
+  - **Server search:** `search_people` returns only onboarded people, never across a block, matched by username prefix or name. Its results are merged into Search.
+  - A Back button now shows while a profile loads.
+
+### 2. "Loading your profile: JWT issued at future"
+
+- **Root cause:**
+  - Supabase's API (PostgREST, error `PGRST303`) can briefly judge a token minted a moment ago as "issued in the future". This is a known, intermittent server-side clock/caching issue (supabase discussion #48123, PostgREST #5172).
+  - The app showed the raw text ("Loading your profile: …") right after a successful verify.
+  - Two further problems made it worse:
+    - The OTP boxes' `onComplete` could fire twice (autofill + paste), which sent two verifies.
+    - After a successful verify, a failure in the profile load cleared the code, so the person had to start over.
+- **Fix:**
+  - **Error classification** (`src/services/backend/errors.ts`):
+    - `PGRST303`, `PGRST301`, `PGRST302` and network failures each get a kind and a plain message. No JWT, PGRST or policy text reaches the UI.
+    - Our own short server sentences ("This request expired.") pass through. Raw policy messages ("violates row-level security…") never do; the security review caught 42501 passing through raw.
+  - **Bounded retry** (`withRetry`, at 0.5 / 1 / 2 / 3.5 s) only for `jwt_future` and network errors. A real refusal (42501, a missing row) fails at once. There are no blind retries.
+  - It wraps the profile bootstrap after sign-in and the world refresh.
+  - **Clock skew:**
+    - The device-vs-server skew is measured from a fresh token's `iat`; only the number is logged, never the token.
+    - Beyond 120 s the message becomes "Your device time appears out of sync…" with how to fix it.
+  - **OTP:**
+    - Verify is single-flight: an identical code already in flight joins it.
+    - A success is remembered for 2 s, so a second autofill/paste event can't resend it.
+    - A failure is forgotten at once, so **Try again** really tries again.
+    - After a verified code, a failed profile load keeps the screen and offers **Try again** without asking for a new code.
+  - **Messages:**
+    - An expired, wrong or superseded code: "That code didn't work or has expired. Check it, or request a new one." (Supabase reports all three as `otp_expired`, and a typo is the most common cause.)
+    - Rate limits, invalid email and disabled sign-ups each have their own message.
+    - Anything unmapped: "We couldn't finish signing you in. Try again."
+  - **Diagnostics:** `[chimp:reliability]` lines in development builds only. They never contain tokens, OTP values or secrets.
+
+### 3. A connection request arrived very late
+
+- **Root cause:**
+  1. There was no realtime signal for connections at all.
+  2. Nothing refreshed relationships when the app came back to the foreground.
+  3. An incoming request was visible only on the sender's profile: no list, no badge.
+  4. `toggleConnect` was non-idempotent, so a double-tapped **Accept** became Accept and then Disconnect.
+- **Fix:**
+  - **`user_events`**, one private per-account feed of "something changed for you":
+    - Written only by triggers; random UUID primary keys.
+    - Readable only by its owner (RLS), and subscribed with `user_id=eq.<me>`.
+    - A Realtime DELETE reveals nothing (`connections` itself is not published, because its PK is the user pair).
+    - Events: connection request / accepted / updated, mutual Crush, relationship updated, Vibe request / accepted / updated, challenge your turn / completed, plan waiting / updated.
+    - At most 30 events per sender per hour (`user_events_per_actor_hour`), so request/cancel loops can't flood someone. Nothing is lost: the app re-reads the real state on foreground and reconnect.
+  - **`set_connection(other, action)`:**
+    - Actions are explicit: request / accept / decline / cancel / disconnect.
+    - Serialised per pair (advisory lock) and idempotent: a repeat returns the current truth.
+    - A request when they already asked you → connected.
+    - Blocks are respected.
+    - Build 4's `request_connection` is unchanged and still emits events.
+    - The old "connections insert/update" policies (which allowed forcing a "connected" row) are dropped. Build 4 only uses the RPC.
+  - **Client intents** (`connectionAction`):
+    - Optimistic, then the server's answer is applied as-is.
+    - One request per person at a time: a second tap joins the first, so a triple-tapped Accept is one Accept.
+    - A failure undoes only its own optimistic change and says why.
+    - Disconnect asks first (native).
+    - Every Connect button (profile, People cards, rows) now shows **Connect / Requested / Accept / Connected**.
+  - **Requests on You:**
+    - A **Connection request(s)** card with Accept / Decline, plus Decline on the sender's profile.
+    - The You tab dot lights up for incoming requests.
+    - A brand-new requester's profile is fetched, so the name is never "Someone".
+
+## The reliability pattern (applied everywhere)
+
+Every piece of shared state now follows the same recipe:
+
+1. **Initial query**
+2. **Realtime where it pays**
+3. **Foreground reconcile**
+4. **Reconnect reconcile**
+5. **Idempotent mutations**
+
+`src/services/live.ts` (REAL accounts only; Demo never touches Supabase) owns steps 2–4 for relationships and nudges After Dark:
+
+- **Channel:** `events:<uid>` on `user_events` INSERT.
+  - Events are nudges only. Their content is never trusted for anything security-relevant.
+  - A burst of events is debounced (400 ms) into a single reload.
+- **Reconcile:** re-reads connections, requests, Crushes, Sparks, blocks and follows (`fetchRelationships`) and applies them as the truth.
+  - One reconcile runs at a time; a reconcile requested meanwhile is queued.
+  - **No flicker:** if a Follow, Crush, Block or Connect of yours is still on its way, a snapshot that may predate it is discarded and re-read 1.5 s later.
+- **Channel status:**
+  - `SUBSCRIBED` (including the first subscribe) → reconcile (covers the gap between the world load and the subscription).
+  - `CHANNEL_ERROR` / `TIMED_OUT` → status *reconnecting*; a quick catch-up after 3 s, then every 20 s until live again.
+  - A channel that hasn't rejoined after 8 s is replaced. Late callbacks of replaced channels are ignored, so there is no resubscribe loop.
+  - `CLOSED` under us → resubscribe with backoff (2, 4, 8, 15, 30 s).
+- **Foreground** (AppState → active), in priority order:
+  1. Relationships, if older than 5 s.
+  2. After Dark, if it's open and older than 15 s.
+  3. The full world, if older than 10 min.
+- **Chat:** unchanged. It already had its own channel, a reconnect catch-up and a foreground catch-up (6B/7A).
+- **After Dark:**
+  - The Vibe channel now also listens to `chat_loops` INSERT/UPDATE (only loops in my Vibes trigger a reload).
+  - It reports its channel status and reloads after a drop.
+  - It exposes `refreshIfActive` / `noteEvent`.
+  - A Vibe request that arrives while After Dark is closed sets a hint. After Dark still loads nothing until it's opened.
+  - `respond` re-reads on failure, so an expired request moves to Ended instead of looking stale.
+
+## Other changes (from the brief)
+
+- **Pending Vibe requests expire:**
+  - After 14 days (`app_settings.vibe_request_ttl_days`).
+  - `respond_vibe` refuses an expired request with "This request expired."
+  - `my_vibes()` closes the caller's stale requests and returns `expired`, shown as "This request expired." instead of "This Vibe has ended."
+  - `request_vibe` closes a stale request between the pair before asking again.
+  - The 7A rules (18+, blocks, Discover opt-in, origins, cooldowns) are unchanged; the security review checked them line by line.
+- **Two Truths and a Lie** (a new challenge):
+  - **Sending:**
+    - Three free-text statements (1–120 characters each, cleaned on the server: control and invisible / direction characters removed, single spaces) and which one is the lie.
+    - Only in an active Vibe with no block, and at most 3 waiting.
+    - Only through `send_two_truths`; the regular `send_challenge` refuses it.
+  - **Guessing:** a guess must be exactly one number 0–2 (a trigger). The sender's answer (the lie) is hidden by the 0007 RLS until the other person has guessed.
+  - **UI:**
+    - Compose: three inputs plus a LIE marker per row; Send stays off until everything is filled in.
+    - The guess screen.
+    - The reveal: "You fooled Maya" / "Maya spotted your lie", with the lie and the guess marked.
+    - The result reads "The lie was spotted / got through", never a score.
+  - The Demo plays it too (the Demo partner guesses).
+- **View-once in production:** see the next section.
+- **Media and voice consent, adversarial:** see the migration section and the security review.
+- **Age:**
+  - The server owns `age_set_at` and `age_bumped_at`.
+  - A correction is allowed within 24 h of first setting the age; after that, only +1 once roughly a year has passed. Age can't be removed.
+  - Cards from before 0008 count as set more than a day ago.
+  - The card can no longer be deleted; that would have reset the clock.
+  - **Self-declared age is still a limitation:** nobody verifies it. 18+ stays enforced server-side on every After Dark action.
+- **Moderation foundation (no admin UI):**
+  - `reports` gains status (open / reviewed / actioned / dismissed), `reviewed_at`, `reviewed_by` and `resolution_note`.
+  - A new report is always *open*, whatever the app sends.
+  - Reporters can read their own reports, but not the moderator's name or notes.
+  - The `moderation` schema is reachable with the server key only:
+    - `moderation.queue` shows each report with the Vibe status and how many reports the subject has.
+    - `moderation.set_status(...)` sets a report's status.
+- **Push foundation:**
+  - `user_events` is the event source for CONNECTION_REQUEST, MUTUAL_CRUSH, VIBE_REQUEST, VIBE_ACCEPTED, CHALLENGE_YOUR_TURN and PLAN_WAITING_FOR_YOU.
+  - MESSAGE_RECEIVED is reserved: chat has its own channel, so no message events are written yet.
+  - Events carry ids only, never message text or romantic content. Future notification text must be generic ("Someone sent you a Vibe request").
+  - No push is sent yet; that needs push tokens and an EAS build.
+
+## View-once: production design
+
+- **Storage:**
+  - A **private bucket** `vibe-media` (images only, 10 MB).
+  - The app may only upload into `once/<its own id>/`. There are no read, list, update or delete policies, so nobody can read these files through the API, the sender included.
+  - **Restrictive** policies seal the bucket even if a broad storage policy is added to the project later.
+- **Sending:**
+  - The media row must be the sender's own file in their own `once/` folder.
+  - A view-once message must use such a file, and only once. A normal photo can never use one.
+  - Enforced by `messages_guard_8_media`, which runs after 0007's type checks and before the trigger that moves the file off the message.
+- **Opening:**
+  - The `view-once` Edge Function:
+    1. Verifies the session (the user id comes from the token, never from the app).
+    2. Calls `view_once_open_as` with the server key. The database decides: the recipient only, once, while the Vibe is active and nobody is blocked, and only the sender's own file in the sender's own folder. It records the opening.
+    3. Downloads the file, deletes it, and marks it purged only if the delete succeeded.
+    4. Returns the bytes once (base64), with only image MIME types.
+  - There is never a URL, so there is nothing to reuse or share.
+  - If the download fails (a storage hiccup), the opening is undone (`view_once_release`) and the person can try again. If the file is already gone, it's "no longer available".
+  - 0007's `open_view_once` (which handed back a path) is revoked from the app.
+- **Client:**
+  - View-once photos are uploaded to the private bucket.
+  - Opening calls the function and shows the image from memory (a data URI).
+  - The tray says "View-once isn't set up on the server yet" if the function isn't deployed (ping).
+  - **Screenshots can't be prevented** by any app, and the app says so.
+- **Expiry and cleanup:** the scheduled sweep (above). A paused Vibe keeps its unopened photos.
+
+## Migration 0008 (what it adds)
+
+- **Settings:** `app_settings` (RLS on, no policies: server only) and `_setting_int`.
+- **`user_events`** plus emitting triggers on `connections`, `crushes`, `vibes`, `vibe_challenges` and `chat_loops`, and `mark_events_seen`.
+  - `_emit` skips: self, deleted accounts, blocked pairs, and senders over the hourly cap.
+  - `purge_old_events` keeps 30 days.
+- **Connections:** `set_connection`; the direct insert/update policies on `connections` are dropped. `search_people`.
+- **Media:**
+  - The `media` insert policy allows rows only in your own folders, a board you own, or your `once/` folder.
+  - A poster must sit next to its video. No `..` in any path.
+  - Pre-0008 posters outside their folder are cleared.
+  - The `media` read policy: private rows are visible only to their owner; chat and After Dark rows to their owner and members of a conversation that uses them.
+- **World teardown (`_world_teardown`, from 0005) redefined:** it deletes only media owned by the item's author (or the World owner, for the cover), and returns only paths inside their own folders.
+- **View-once:**
+  - The `vibe-media` bucket and its storage policies, `purged_at`, and a unique index (pre-0008 duplicates are de-duplicated first).
+  - `messages_media_guard`.
+  - Server-only functions: `view_once_open_as`, `view_once_mark_purged`, `view_once_release`, `view_once_sweep_candidates` (paths only inside the sender's folder; anything else is marked gone, never deleted) and `view_once_orphans`.
+- **Vibes:** `_expire_pending_vibes`, `expire_stale_vibes`; `request_vibe`, `respond_vibe` and `my_vibes` redefined (`my_vibes` adds an `expired` column).
+- **Two Truths:** `vibe_challenges.statements`, the kind and statement checks, `_clean_text`, `send_two_truths`, and the answer guard.
+- **Age:** the age guard trigger plus clocks, a backfill, and separate select/insert/update policies (no delete).
+- **Moderation:** report columns, the insert guard, column-level SELECT for the app, and the `moderation` schema (queue view, `set_status`).
+- **Grants:**
+  - Every new function is revoked from PUBLIC/anon first.
+  - Only app functions are granted to `authenticated`.
+  - Internal helpers and trigger functions are callable by nobody.
+  - Server-only functions are granted to `service_role` only.
+
+## Independent adversarial security review
+
+A separate agent with no part in writing the code reviewed 0008, the Edge Functions and the client. It ran each exploit against local Postgres. All findings were fixed in 0008 or the function, and each has a regression test (Z1–Z17, F2b/F2c, F3a–c).
+
+| # | Severity | Finding | Fix | Test |
+|---|---|---|---|---|
+| F1 | **High** | A media row's `poster_path` (and a post's `media_ids`) could point at someone else's file. Deleting a World then handed that path to the server-key storage delete, so another user's avatar could be deleted. | Poster must sit in the video's own folder, and no `..`. Teardown deletes only the item author's own media inside their folders. Planted posters are cleared. | Z1–Z4 |
+| F2 | Medium | Age guard bypass: 0007's `FOR ALL` policy allowed delete + re-insert (resetting the age clock). Pre-0008 cards had no `age_set_at`, so any edit reopened the 24 h window. | No delete policy; clocks backfilled; no `updated_at` fallback. | Z5, Z6, F2b, F2c |
+| F3 | Medium | 0008 failed (half-applied under `psql -f`) on 0007 data where one view-once file was sent twice. | De-duplicate before the unique index; the whole migration runs in one transaction. | F3a–c (0007 data → 0008 → re-run) |
+| F4 | Medium | Event flooding (request/cancel loops, Crush toggles). | 30 events per sender per hour. | Z7 |
+| F5 | Medium | Media rows planted before 0008 could make the sweep (or an open) delete someone else's file with the server key. | Open and sweep only act on the sender's own file in the sender's folder; otherwise the row is marked gone, not deleted. | Z8, Z9 |
+| F6 | Low | Reports could be inserted as already "actioned" with a forged reviewer; reporters could read moderators' notes. | Insert guard; column-level SELECT. | Z14–Z16 |
+| F7 | Low | Files that are never deleted (media row removed, unsent uploads); a failed delete still marked purged; a transient download failure lost the photo. | Orphan sweep; mark purged only on a successful delete; `view_once_release`. | Z10–Z12 |
+| F8 | Low | The private bucket depended on no broad storage policy existing. | Restrictive seal policies. | Z13, Z13b |
+| F9 | Info | Sender-claimed MIME returned as-is; invisible characters accepted as statements; raw 42501 text passed to the UI; paused Vibes lost unopened photos. | MIME allow-list in the function and the client; `_clean_text` strips them; policy text filtered; paused Vibes kept. | Z17, V4, O18 |
+
+**Checked and held up (from the review):**
+- **`user_events`:** private, can't be written by the app, random PK, blocks respected.
+- **`set_connection`:** forcing, self-accept and block bypass are all closed; Build 4's RPC still works.
+- **`search_people`:** wildcards stripped, minimum 2 characters, capped at 50, excludes non-onboarded and blocked people, no extra fields, not callable by anon.
+- **View-once:** upload confined to your own folder; the recipient can't see the media row; open/sweep are not callable by the app; trigger order is correct.
+- **Two Truths:** the lie is unreadable before guessing.
+- **Vibe RPCs:** `request_vibe` / `respond_vibe` are identical to 0007 apart from expiry.
+- **Hardening:** every SECURITY DEFINER function sets `search_path`; the moderation schema is not exposed.
+- **Client:** no secrets in `src/`; `diag()` never logs tokens or OTP codes.
+
+**Residual risks (documented, not fixed):**
+- Hosted Storage uploading with an INSERT-only policy still needs checking on your project (step 2 of the two-phone script).
+- Self-declared age.
+- A sender's app chooses the stored MIME type (harmless now: the function and the client allow-list it).
+- `search_people` hiding blocked people reveals that you were blocked (already visible through Build 4's `request_connection`).
+
+## Files
+
+**New (8):**
+- `supabase/migrations/0008_phase7b_reliability.sql`
+- `supabase/functions/view-once/index.ts`
+- `src/services/backend/errors.ts`
+- `src/services/backend/people.ts`
+- `src/services/live.ts`
+- `src/store/usePeople.ts`
+- `src/hooks/useConnection.ts`
+- `src/components/profile/ConnectionRequests.tsx`
+
+**Modified (31):**
+- **Screens:**
+  - `src/app/_layout.tsx`
+  - `src/app/(auth)/verify.tsx`
+  - `src/app/(tabs)/you.tsx`
+  - `src/app/profile/[id].tsx`
+  - `src/app/search.tsx`
+  - `src/app/after-dark/challenge/[id].tsx`
+  - `src/app/after-dark/vibe/[id].tsx`
+- **Components:**
+  - `src/components/TabBar.tsx`
+  - `src/components/profile/MatchCard.tsx`
+  - `src/components/profile/PersonRow.tsx`
+  - `src/components/afterdark/v2/ChallengesTab.tsx`
+  - `src/components/afterdark/v2/VibeChat.tsx`
+  - `src/components/afterdark/v2/VibesTab.tsx`
+- **Data:** `src/data/afterDarkChallenges.ts`
+- **Services:**
+  - `src/services/afterDarkApi.ts`
+  - `src/services/chatApi.ts`
+  - `src/services/demoAfterDark.ts`
+  - `src/services/demoChat.ts`
+- **Backend services:**
+  - `src/services/backend/afterDark.ts`
+  - `src/services/backend/auth.ts`
+  - `src/services/backend/chat.ts`
+  - `src/services/backend/content.ts`
+  - `src/services/backend/media.ts`
+  - `src/services/backend/realData.ts`
+- **Stores:**
+  - `src/store/useAfterDark.ts`
+  - `src/store/useChat.ts`
+  - `src/store/useChimp.ts`
+  - `src/store/useSession.ts`
+- **Functions:** `supabase/functions/delete-account/index.ts`
+- **Docs:** `BUILD_NOTES.md`, `README.md`
+
+**Not modified:** migrations 0001–0007, `app.json`, `package.json`. No new packages and no native changes.
+
+## Tested locally
+
+All of this ran on local Postgres 16 (with a Supabase stub) and Chromium (web export) against a multi-user Supabase mock. Nothing ran on an iPhone, and nothing ran on your Supabase project.
+
+| Suite | Result |
+|---|---|
+| TypeScript `tsc --noEmit` | clean |
+| ESLint `expo lint` | clean (no new suppressions) |
+| DB · 0008 suite `pg_7b_test.sql`: connections, events, search, Crush, After Dark events and expiry, view-once, media consent, Two Truths, age, moderation, security regressions Z1–Z17, grants, deletion | **112 / 112** |
+| DB · security split runs (0007 data → 0008): F3 duplicate view-once + re-apply; F2 legacy cards | 3/3 · 2/2 |
+| DB · older suites re-run on 0001–0008: 6D 62/62 · delete-world 34/34 · messaging 113/113 · chat 35/35 · 6C 19/19 · avatars 9/9 | all equal to their 0007 results |
+| DB · `pg_rls_all_6d` | 35/37 on **both** 0007 and 0008 (two Spark-fixture checks fail identically before 0008: pre-existing, not 7B) |
+| DB · 7A suite adapted to 0008 (uid-folder fixtures) | 110/115; the 5 are the intended view-once change (a public-bucket view-once is refused; the direct open is revoked) |
+| Node · 7B reliability `b7.ts`: errors / retry / clock skew, OTP single-flight, connection intents (incl. triple-tap Accept), reconcile and live routing, stuck / closed channels, profile-by-id states, view-once client | **55 / 55** |
+| Node · Two Truths + After Dark refresh `t7.ts` | **14 / 14** |
+| Node · 7A `a7.ts` 90/90 · messaging `m7.ts` 38/38 · 6C `c6.ts` 56/56 | all pass |
+| Web · **two accounts, two browsers** `b7_web.py` (Tests A–F below) | **23 / 23** |
+| Web · Two Truths in the App Review Demo `tt7_web.py` (zero Supabase calls) | **10 / 10** |
+| Web · After Dark `ad7_test` 56/56 · sweep 12/12 · REAL-without-0007 6/6 · App Review Demo `review_test` 31/31 | all pass |
+| Web regression (dev build) · 6D 72/72 · 6C 69/69 · chat 38/38 · avatars 15/15 · delete-world 29/29 · 6C smoke 33/33 · re-entry cycles completed · Demo sweep 0 errors | all pass |
+| Web · group messaging `m7_test` | 80/80 in 3 of 5 runs. The 2 other runs failed one timing-sensitive check ("owner leaving says who takes over" read 0.5 s after opening Group info, before the member list loaded). With a wait it passes; it passed in 7A. Logged as a flaky check, to watch on device. |
+
+**Regression tests A–F** (web, two REAL accounts in two browsers):
+
+- **A · profile by id:**
+  - A brand-new account found by search opens through **Loading…** while its profile lags; "not found" never shows.
+  - A profile that truly doesn't exist says so after about 4.4 s of retries, not instantly.
+- **B · sign-in:**
+  - `PGRST303` injected twice on the profile bootstrap → retried → signed in.
+  - No JWT/PGRST text anywhere.
+  - One verify request for one code.
+- **C · connection request:**
+  - Nova sends → Ana's You tab shows the request in **≈0.5 s** with Nova's name, no restart.
+  - A double-clicked Accept sends **one** `accept`; both are connected on the server.
+  - Nova sees **Connected** within moments.
+  - Both reload → both still Connected.
+- **D · drop:** Ana's socket is dropped, a request is made while she can't hear it → it appears within **≈3 s**.
+  - That came from the quick catch-up. The mock's re-routed socket doesn't carry supabase-js's rejoin, so Supabase's own reconnect is for the phone test.
+- **E · foreground:**
+  - With Realtime silent, a request made while the page is hidden is not shown.
+  - When the page becomes visible, it appears within **0.2 s**.
+- **F · search:** server search finds a person who isn't in your world yet.
+
+## Known limitations
+
+- **Not yet on real phones or your Supabase project.** Realtime reconnect behaviour of supabase-js on iOS (background / foreground, network switches) is exactly what the two-phone script checks.
+- **Push notifications:** only the event foundation exists. No tokens are stored and nothing is sent.
+- **Self-declared age:** no verification.
+- **Screenshots of view-once photos can't be prevented.** A photo opened while the response is lost in transit is gone (view-once semantics); a storage error before sending lets you retry.
+- **Expiry and cleanup:**
+  - Expiry of pending Vibe requests is lazy (when either person loads After Dark) unless the sweep is scheduled.
+  - Old events and private files are removed only by the scheduled sweep.
+- **Network changes:** there is no separate offline detector (`NetInfo` would need a native module). Offline is handled by Realtime status, foreground reconcile, and retries/Retry on screens.
+- **Event cap:** at most 30 events per sender per hour. Beyond that the other person's phone catches up on foreground or reconnect rather than instantly.
+- **Not yet idempotent:** Crush and Follow toggles still flip a flag and sync. The reconcile corrects them, and a reconcile never overwrites an in-flight change.
+- **Group test flake:** `m7_test` has one timing-sensitive check (see above).
+
+## Two-phone test plan (real Supabase project; needs the EAS build)
+
+Use two iPhones (A and B) with accounts that are not each other's connections. Use a stopwatch.
+
+1. **Setup:**
+   - 0008 run with no errors (SQL Editor shows success). Run it a second time: still no errors.
+   - `view-once` and `delete-account` deployed.
+   - `user_events` in the realtime publication.
+2. **View-once upload:**
+   - B sends A a view-once photo in an active Vibe.
+   - It must upload; this is the Storage INSERT-only check.
+   - Supabase Storage → `vibe-media` shows the file under `once/<B>/`.
+3. **New profile (Issue 1):**
+   - B creates a brand-new account and finishes onboarding.
+   - A searches B's username and opens the profile: **Loading…** then the profile, never "not found".
+   - Also open B's profile from a link or id while A's app has never seen B.
+4. **OTP (Issue 2):**
+   - Sign in on B by **pasting**, by **iOS autofill from Mail**, and by **typing** (one at a time).
+   - **Resend**, then try the old code ("didn't work or has expired"); the new code must work.
+   - Try an expired code (wait about 1 h).
+   - Set B's clock 10 min ahead (Settings → General → Date & Time, automatic off) → sign in → expect the clock message, not JWT text.
+   - Restore the clock.
+5. **Connection request (Issue 3), both apps open:**
+   - B taps Connect on A → A's You tab dot plus the request card **within ~2 s**.
+   - A double-taps Accept → B shows Connected **within ~2 s**.
+   - Kill both apps and reopen: still connected.
+6. **Backgrounded:**
+   - A backgrounds the app. B disconnects and sends a new request.
+   - A foregrounds → the request shows **within ~2 s of opening**.
+7. **Network switches:**
+   - A goes to Airplane mode for 30 s, then back on Wi-Fi, then cellular.
+   - Meanwhile B sends a Vibe request and a challenge.
+   - A catches up **within ~5 s** of the network returning, without a restart.
+8. **After Dark sync (both 18+):**
+   - Mutual Crush → both see "It's mutual".
+   - Vibe request / accept, pause / resume / end / block: each side updates within seconds, with no stale active Vibe.
+   - Two Truths: B sends, A guesses, both see the reveal.
+   - A Plan proposed → the other sees "waiting on you".
+9. **View-once:**
+   - A opens B's photo once; a second open says "already opened".
+   - B can't open their own. After blocking, it can't be opened.
+   - Storage no longer has the file after it's opened.
+10. **Moderation:**
+    - Report from a Vibe.
+    - In the SQL Editor, `select * from moderation.queue` (as postgres) shows it. `select moderation.set_status(...)` works.
+11. **App Review Demo:** still works from Welcome, with no network needed.
+
+## Phase 7C recommendations
+
+- The UI redesign (deferred from 7B), with the requests card moved somewhere more prominent on You.
+- Push notifications on top of `user_events`: tokens table, an Edge Function sender, generic text only, and user controls.
+- Idempotent Crush and Follow intents (like `set_connection`).
+- Schedule the sweep by default, and add a small moderation tool on the server key.
+- Age assurance options, if After Dark grows.
+- An offline indicator (`NetInfo`, in the next native build).
+
+## Final status
+
+| FEATURE / ISSUE | STATUS | TESTED LOCALLY? | TESTED REAL SUPABASE? | TESTED TWO PHONES? | NEEDS EAS BUILD? | READY FOR 7C? |
+|---|---|---|---|---|---|---|
+| Issue 1 · new profile opens (no "No page found") | Fixed | Yes (Node + web A, F) | No | No | Yes | Yes, after the phone test |
+| Issue 2 · "JWT issued at future" / OTP | Fixed (retry + plain messages + clock skew) | Yes (Node + web B) | No | No | Yes | Yes, after the phone test |
+| Issue 3 · late connection requests | Fixed (events + reconcile + requests UI) | Yes (Node + web C, D, E) | No | No | Yes | Yes, after the phone test |
+| Idempotent connections (double-tap Accept) | Done | Yes (DB, Node, web) | No | No | Yes | Yes |
+| Foreground / reconnect reconciliation | Done | Yes (Node, web D/E) | No | No | Yes | Yes, after the phone test |
+| After Dark realtime (Vibes, challenges, Plans) | Done | Yes (DB events, Node, web suites) | No | No | Yes | Yes, after the phone test |
+| Pending request expiry (14 days) | Done | Yes (DB, UI copy) | No | No | Yes | Yes |
+| Two Truths challenge | Done | Yes (DB, Node, web Demo) | No | No | Yes | Yes |
+| View-once production design | Done (bucket + function + sweep) | Yes (DB, Node) | No — function and storage untested | No | Yes | After the upload / open check |
+| Media / voice consent revalidation | Done | Yes (DB) | No | No | No (server) | Yes |
+| Moderation foundation | Done | Yes (DB) | No | No | No | Yes |
+| Age hardening | Done (self-declared remains) | Yes (DB) | No | No | No | Yes |
+| Push foundation (events only) | Foundation only | Yes (DB events) | No | No | Yes (for push) | Yes |
+| Security review findings F1–F9 | All fixed + regression tests | Yes | No | No | No | Yes |
+| 7B patch · photo / view-once consent (locked rows, server check, picker timing, plain errors) | Fixed | Yes (DB PH1–PH10, Node 19/19, web 36/36) | No | No | Yes | Yes, after the phone test |
+| App Review Demo (local, zero Supabase calls) | Unchanged + Two Truths | Yes (31/31, 10/10) | n/a | No | Yes | Yes |
+
+**Phase 7B is not complete until the two-phone script passes on your Supabase project.**
+
+
+# Chimp build notes — v0.7A — After Dark v2 Foundation
+
+1 Oct 2026 · branch `phase-7`.
+
+`master` and the tagged TestFlight Build 4 (`testflight-0.1.0-build4`) are untouched. No commits were made: everything is in the `phase-7` working tree.
+
+After Dark becomes a romantic interaction layer built on Chimp's own primitives (Crush, conversations, Open Loops, blocks, relevance context):
+
+**Discover → mutual intent → Vibe → Challenges → conversation → Plans → a real date, or a clean goodbye.**
+
+Real attraction. Mutual intent. Playful chemistry. Real plans.
+
+## What you must do once
+
+1. **Supabase → SQL Editor:** run `supabase/migrations/0007_phase7a_after_dark.sql`.
+   - Run it **after 0006**. It checks for 0006 first.
+   - It is idempotent; running it twice is safe.
+   - **Never re-run 0001–0006 after it.** 0006's conversation-kind check and 0002's message-type check would reject the new `vibe` conversations and `voice` messages.
+2. **New native build:** voice notes use `expo-audio`.
+   - It is in Expo Go, so you can test there, but TestFlight needs a new EAS build.
+   - `app.json` adds the expo-audio plugin with the microphone permission text.
+   - There are no OTA updates in this project, so Build 4 never receives this JavaScript.
+3. **Nothing else:** no Edge Functions, no new secrets, no service-role key in the app. RLS stays on everywhere.
+
+## What changed (product)
+
+- **After Dark tab:**
+  - It goes 18+ confirmation → **your After Dark card** (age required once; a Demo card is seeded) → five top tabs.
+  - The bottom bar (Boards / Buzz / Happening / You / After Dark) is unchanged.
+  - The old "Inside After Dark" section grid (a copy of Boards) is gone from the tab. The After Dark *World* still exists as a World.
+- **Discover:**
+  - Large photo-first cards: tap through photos; first name, age, broad city, intent, interests.
+  - **Why you may vibe:** Worlds you're both in, shared interests, mutual connections. Never a percentage.
+  - Their **Open Loop** is on the card.
+  - Actions:
+    - **Pass**: private.
+    - **Crush**: private, and it's the normal Chimp Crush.
+    - **Respond** to their Open Loop, or **Send interest**: this asks for a Vibe, and they decide.
+  - Only adults who switched on **Show me in Discover** appear there.
+- **Crush and mutual Crush:**
+  - Crush stays the private Chimp primitive.
+  - A mutual Crush shows **It's mutual** (in Discover, on the Vibes tab, and on their profile's Spark card), with **Take it After Dark** or **Start normal chat**.
+  - Nothing unlocks until the other person accepts the Vibe: no photos, no voice notes, no plans.
+  - "Normal chat" stays in normal Messages. Taking it After Dark later creates a separate Vibe chat. The normal conversation is never copied or moved.
+- **Vibes:**
+  - Each Vibe is the pair ("You + Maya").
+  - **Status:** Active / Pending / Cooling (quiet for 5 days) / Paused / Closed.
+  - **Stage, in words only:** Curious → Spark → Building → Strong Vibe.
+  - **One contextual next step:** "Maya is waiting on your answer", "A plan is waiting for a yes". Never "why haven't you replied", never last-seen.
+  - **Cooling** offers **Keep it going / Close Vibe**.
+  - Requests waiting on you come first, with how they started.
+- **Challenges** (only inside a Vibe):
+  - Six games: Same Brain, Would You Rather, Predict Me, Choose the Night, Fast Five, After Hours.
+  - Filters: Incoming / Waiting on Them / Completed.
+  - Both people answer privately; results show only after both have played, and become part of the Vibe.
+  - Next steps afterwards: "Make this night a plan", "Play another", "Back to the chat".
+  - No leaderboards; results are pair-level only ("4 of 5 the same").
+- **Plans:**
+  - Private to the pair.
+  - Open Loop → **Proposed → Confirmed → Completed**, with **Paused / Closed** available any time.
+  - Actions: **Accept · Tweak · Pause · Close**.
+  - Whoever proposes or changes the time or place waits for the **other** person's yes.
+  - Places are free text (a neighbourhood or venue), never a live location.
+- **Inbox:**
+  - One conversation per Vibe, separate from normal Messages (which never lists them).
+  - The header shows how the Vibe started.
+  - The timeline holds text, voice notes, photos, **view-once photos**, reactions and replies, plus the pair's Challenge, Open Loop and Plan cards.
+- **Consent:** "the recipient of romantic interest controls the next level of access."
+  - A Vibe is pending until the person who was asked accepts.
+  - Each person decides what the other can send *them*: photos (off by default) and voice notes (on).
+  - There is no gender anywhere in the data model.
+- **Leaving:**
+  - Every Vibe has **Pause / End / Block / Report**.
+  - End reasons are private: Not feeling it / Timing isn't right / Looking for something different / Met someone / Other.
+  - The other person sees only "This Vibe has ended."
+  - After End or Block, neither person can message. The person who was ended on can't restart the Vibe.
+- **Private Crush as a relevance signal:**
+  - It is a tiny, silent weight in the shared social term used by Buzz, Happening, Worlds, Moves and Stories, and a +1 nudge in people suggestions.
+  - It never adds a name or a reason, so nothing on screen can reveal it.
+  - It is exposed as `privateCrushSignal()` for future Opportunity Graph work. No new ranking system.
+
+## Migration 0007 (what it adds)
+
+- **Reused:**
+  - `conversations` (new kind `'vibe'`)
+  - `messages` (type `'voice'`, plus `view_once` / `viewed_at` / `duration_ms`)
+  - `chat_loops` (`plan_state` / `plan_at` / `plan_by`)
+  - `crushes` / `my_sparks()`
+  - `blocks`, `media` (kind `'audio'`), and the storage folder `afterdark/{you}/`
+- **New tables:**
+  - `after_dark_profiles`: opt-in card; age 18–99; Discover only if `discoverable`.
+  - `after_dark_passes`: private.
+  - `vibes`, `vibe_members`: each person's own `allows_photos` / `allows_voice`.
+  - `vibe_closures`: private end reasons.
+  - `vibe_challenges`, `vibe_challenge_answers`: the other person's answers are unreadable until both have answered.
+  - `view_once_media`: the file behind a view-once photo; no policies, so nobody can read it.
+  - `reports`.
+- **Functions (security definer, `search_path` set, revoked from anon):**
+  - Vibes: `request_vibe`, `respond_vibe`, `pause_vibe`, `resume_vibe`, `end_vibe`, `set_vibe_controls`.
+  - Challenges: `send_challenge`, `answer_challenge`.
+  - Other: `open_view_once`, `my_vibes`, `after_dark_discover`.
+  - Internal helpers (`vibe_for`, `_romantic_open`, `is_blocked_between`) are not callable from the API.
+- **Redefined (backwards compatible with the shipped Build 4):**
+  - `can_participate`, the "messages send" policy and `my_conversations()` (which excludes Vibes).
+  - The "media read" policy: chat and After Dark files are readable only by their owner and by members of a conversation that uses them.
+- **Triggers:**
+  - Message guard: media must be your own, of the right kind; the view-once fields are immutable.
+  - The view-once file is moved off the message row.
+  - Plan rules: only in Vibes; only the other person confirms; finished plans are frozen.
+  - A **block closes any open Vibe** between the two people.
+- **Realtime:** `vibes` and `vibe_challenges` are published, with random uuid keys and RLS applied.
+
+## Architecture decisions and why
+
+- **A Vibe's chat is an ordinary conversation of kind `'vibe'`**, not a new messaging system. It reuses messages, reactions, Open Loops, read state, RLS and Realtime as they already are.
+  - Normal Messages (`my_conversations`) filters Vibes out, so Build 4 never sees them.
+  - The chat store gained `claimConversations()`: After Dark claims its live messages, so the Messages list isn't reloaded for every romantic message.
+- **Plans are Open Loops** with a plan state, and a resolved loop can become a plan. One table, one realtime path.
+- **One API interface, two backends** (as with chat): `afterDarkApi.ts` (Supabase) and `demoAfterDark.ts` (in-memory, seeded).
+  - The Demo applies the same rules as the server: gates, plan rules, view-once once, block → closed, the 7-day re-ask cooldown.
+  - The Demo makes zero network requests.
+- **After Dark loads lazily.** The store is bound to the account at launch but makes no request and opens no Realtime channel until After Dark is opened (or a mutual Crush is acted on).
+  - Root cause: starting it eagerly added a channel and requests to every REAL session, which made the timing-sensitive messaging regression flaky. It is also more private.
+- **View-once is a state model, not a secrecy guarantee.**
+  - The server enforces recipient-only, open-once, and only while the Vibe is active.
+  - The file reference lives in a table nobody can read.
+  - **The file itself still sits in the public `media` bucket at an unguessable path.** Phase 7B: private bucket, signed one-time URLs, deletion after opening.
+  - The app says "Screenshots can't be blocked."
+- **Shared first names are disambiguated** ("Maya C." / "Maya T.").
+
+## Independent security review (all fixed in 0007 and re-tested)
+
+An independent agent probed 0007 against a local Postgres. Its findings, all fixed:
+
+1. **(High) Photo/voice consent bypass:** media could be sent labelled as `text` or `voice`. Fix: the guard requires the media to be the sender's own and of the declared kind.
+2. **(High) Vibe media readable by any signed-in user; unopened view-once file reachable through `messages.media_id`.**
+   - Fix: "media read" restricted to the owner and to conversation members; chat and After Dark files are no longer listable.
+   - The view-once file moved to `view_once_media`, which has no policies.
+3. **(Medium) Plan self-confirm:** a note edit by the other person flipped the proposer. Fix: note and status edits keep the proposer; finished plans are frozen.
+4. **(Medium) A mutual-Crush request carried text to someone who never confirmed 18+.** Fix: every request now needs the recipient's After Dark age (18+).
+5. **(Medium-low) Challenges could be answered after a block.** Fixed.
+6. **(Low) After a block a Vibe still looked "active".** Fix: a block now closes the Vibe; the blocked person sees "This Vibe has ended."
+7. **(Low) View-once could be opened after End or Block.** Fixed.
+8. **(Low) Request spam and lockout:** a requester could withdraw and re-ask indefinitely, and a withdrawn request could lock the other person out. Fix: the pair's latest Vibe decides, with a 7-day cooldown after withdrawing.
+9. **(Low) Card photos from another user's folder.** Fix: card photos must come from `afterdark/{you}/`.
+10. **(Low) Reports could probe other people's Vibes.** Fix: a report can only reference your own Vibes and messages.
+11. **(Low, from 0002) Anyone could ask whether two people had blocked each other.** Fix: `is_blocked_between` is revoked from API roles.
+
+## Files
+
+- **New:**
+  - `supabase/migrations/0007_phase7a_after_dark.sql`
+  - `src/services/backend/afterDark.ts`, `src/services/afterDarkApi.ts`, `src/services/demoAfterDark.ts`
+  - `src/store/useAfterDark.ts`, `src/utils/afterDark.ts`, `src/data/afterDarkChallenges.ts`
+  - `src/components/afterdark/v2/`:
+    - `adTheme.ts`, `useAdData.ts`, `VibeParts.tsx`
+    - `AfterDarkHome.tsx`, `DiscoverTab.tsx`, `VibesTab.tsx`, `ChallengesTab.tsx`, `PlansTab.tsx`, `InboxTab.tsx`
+    - `VibeChat.tsx`, `VoiceNote.tsx`, `DisconnectSheets.tsx`, `MutualCrushSheet.tsx`, `CardEditor.tsx`, `SparkActions.tsx`
+  - `src/app/after-dark/vibe/[id].tsx`, `src/app/after-dark/challenge/[id].tsx`, `src/app/after-dark/card.tsx`
+  - `assets/demo/after-dark-voice.mp3`: the Demo voice note, 7 s, synthesised.
+- **Changed:**
+  - `src/app/(tabs)/after-dark.tsx`: gate → card → v2 home.
+  - `src/app/_layout.tsx`: routes, plus binding After Dark to the account.
+  - `src/app/profile/[id].tsx`: Spark card actions.
+  - `src/app/settings.tsx`: Demo reset includes After Dark.
+  - `src/services/backend/chat.ts`: voice, view-once, `openViewOnce`, plan fields.
+  - `src/services/backend/media.ts`: `uploadAudio`, the `afterdark` folder.
+  - `src/services/chatApi.ts`, `src/services/demoChat.ts`: Vibe conversations and gates, view-once, voice, plan rules.
+  - `src/store/useChat.ts`: voice, view-once, `claimConversations`.
+  - `src/graph/config.ts`, `src/graph/relevance.ts`: the silent private-Crush signal.
+  - `app.json` (expo-audio plugin), `package.json` / `package-lock.json` (`expo-audio ~57.0.5`).
+  - `BUILD_NOTES.md`, `README.md`.
+
+## Tested locally (web + local Postgres; not on an iPhone, not on your Supabase project)
+
+- **SQL** (local Postgres 16; 0001 → 0007, then 0004–0007 re-applied to prove re-runs are safe):
+  - **Phase 7A suite: 115/115.**
+    - Discover, Crush privacy, mutual Crush → Vibe.
+    - Pending / accept / decline.
+    - Consent gates for photo, voice and view-once.
+    - Challenges, with answers hidden until both have played.
+    - Open Loop → Plan rules, Pause / End / Block, reports, direct-write refusals.
+    - Account deletion, Realtime and grants.
+    - 19 regression tests for the security-review findings (S1–S19).
+  - **Earlier suites, re-run on 0007:**
+    - Messaging 113/113, chat 35/35, 6D 62/62, avatar 9/9.
+    - Delete-world 34/34, 6C 19/19 and RLS 24 pass: these have the same known fixture errors / 2 known fixture FAILs as before 0007.
+- **Independent security review** (a separate agent, adversarial, against local Postgres): 11 findings. All are fixed, and each has a regression test.
+- **Node** (the real app modules):
+  - After Dark data layer 90/90: Demo backend + store, gates, plans, view-once, lazy loading, the silent Crush signal.
+  - Messaging 38/38, 6C 56/56.
+- **Web** (Playwright, App Review Demo on a build configured for a mock Supabase that records every request):
+  - **After Dark end to end: 56/56 at 390×844 and 430×932** (also 56/56 at 375×667 before the last layout tweak):
+    - 18+ gate; Discover (photo tap-through, Why you may vibe, Crush → It's mutual → Take it After Dark → pending → accepted; Respond; Pass).
+    - Vibes (Cooling → Close Vibe with a private reason; accepting a request).
+    - Challenges (play → result → next steps), Plans (Accept, Open Loop → plan).
+    - Inbox and the Vibe screen (voice note, view-once open-once, tray, controls, Pause/Resume, Report, Block).
+    - Normal Messages without Vibe chats.
+    - **Zero Supabase requests** throughout.
+  - **Route sweep: 19 After Dark routes (including bad ids) × 3 sizes: 12/12.** No horizontal overflow, "isn't available" for bad ids, no page errors, no Supabase calls.
+  - **App Review Demo regression: 31/31.**
+  - **REAL account smoke: 6/6.** No After Dark request or channel until After Dark is opened; without 0007 on the server you get the card setup, never a crash; Messages unaffected.
+- **Web regression:**
+  - 6D 72/72, 6C 69/69 (dev build), 1:1 chat 38/38, avatar 15/15, delete-world 29/29, REAL smoke 33/33, messaging 80/80.
+  - REAL → Demo → REAL cycles completed with 0 page errors; Demo route sweep 0 errors.
+  - **Root cause found on the way:** with After Dark starting eagerly in every REAL session, the messaging suite's "B gets A's message within 2.5 s" check failed twice. After Dark now loads only when opened, and the suite passes 80/80.
+  - The suite's known 1:1 Same Brain 30-second timing check still flaked once on a rerun.
+- **Checks:** TypeScript 0 errors, ESLint clean. Client RPC names and parameters were checked against the SQL signatures.
+- **Not tested here:** an iPhone, your Supabase project, real microphone recording, and voice playback on a device (the web harness can't record audio).
+
+## Known limitations (7A)
+
+- **View-once:** see above. The file stays in the public bucket (unguessable path) until 7B. Screenshots can't be prevented.
+- **Age is self-declared** (18–99). There is no verification yet.
+- **Two Truths** isn't in yet: it needs free-text statements, while answers are option numbers today. It's in 7B.
+- **No push notifications:**
+  - Mutual Crushes, requests and challenges show inside the app (tab dots, cards).
+  - Loop and plan changes in a Vibe you don't have open appear the next time After Dark refreshes (opening a tab or the Vibe). There's no polling.
+- **Demo only:** the other person accepts your request or answers your challenge after about 6 seconds, so the whole loop can be tried.
+- **Report:** reports are stored, but there's no moderation queue yet (7B).
+- **Profile links:** in REAL, a person who isn't in your loaded world has no profile page to open from After Dark. Their names still load.
+
+## Still to check on a real iPhone (new EAS build) and your Supabase project
+
+1. Run 0007 on the project; confirm it finishes without errors. Run it a second time; it should still be fine.
+2. **Two REAL accounts (A, B), both open to dating:**
+   1. Each enters After Dark → card (age) → A switches on **Show me in Discover**.
+   2. B sees A in Discover → **Respond** → A sees **Waiting on you** → Accept.
+   3. Both are in the Vibe chat live (Realtime).
+3. **Mutual Crush:**
+   - Crush each other from profiles → **It's mutual** on both phones.
+   - **Start normal chat** stays in Messages.
+   - **Take it After Dark** → pending → accept → a separate Vibe chat. The normal chat is unchanged.
+4. **Voice note:**
+   - The first tap asks for the microphone.
+   - Record → send → the other phone plays it (also in silent mode).
+   - Turn **Voice notes** off in controls → the mic is refused.
+5. **Photos and view-once:**
+   - Photos are refused until the recipient turns them on.
+   - View-once → the recipient opens it once → "Opened" on both phones → it can't be reopened.
+6. **Challenges:** send → play on both phones → the result appears on both → "Make this night a plan".
+7. **Plans:** propose → only the other person can Accept → Tweak goes back to the other person → Pause / Close.
+8. **Leaving:**
+   - Pause (the other phone sees it's paused).
+   - End with a reason (the other phone sees only "This Vibe has ended.").
+   - Block from a Vibe (the Vibe closes for both).
+   - Report.
+9. Normal Messages never shows Vibe chats, on either the new build or **Build 4**.
+10. **App Review Demo:** After Dark → 18+ → the whole seeded flow works with no sign-in.
+11. Layout on iPhone 12 and 15 Pro Max: Discover card plus actions above the tab bar; the keyboard with the Vibe composer.
+
+## Phase 7B recommendations
+
+- **View-once for real:**
+  - A private bucket, and signed one-time URLs issued by `open_view_once`.
+  - Server-side deletion of the object after opening or expiry; the `view_once_media.opened_at` rows are the cleanup queue.
+  - On iOS, a screenshot notice.
+- **Age assurance** beyond self-declaration, and a moderation queue for `reports` (with block/report analytics).
+- **Push** for: a request waiting on you, a mutual Crush, your turn in a challenge, a plan waiting for a yes. Respect quiet hours.
+- **Two Truths:** free-text challenge items, with server-side reveal rules.
+- **Realtime for loops and plans across Vibes** (one channel on `chat_loops` filtered to my Vibe conversations).
+- **Opportunity Graph v2:** use `privateCrushSignal()` and After Dark activity as private, low-weight edges; never surface them.
+- Optionally, auto-expire long-pending requests (for example after 14 days).
+
+---
+
 # Chimp build notes — TestFlight App Review access patch
 
 1 Oct 2026 · Apple rejected the first external TestFlight build under Guideline 2.1(a): the reviewer couldn't get into the app (sign-in needs a code sent to an email they don't have). This patch gives App Review a way in **without changing how real people sign in**. It isn't a feature and it isn't Phase 7. The messaging-patch notes follow below.

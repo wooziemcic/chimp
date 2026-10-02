@@ -28,11 +28,11 @@ export function DatingSummary({ openTo, sparks, onEdit }: { openTo: OpenTo[]; sp
         </T>
       </Tap>
       {sparks.length ? (
-        <Tap onPress={() => router.push(`/profile/${sparks[0]}`)} scaleTo={0.98} style={[styles.pill, styles.spark]} accessibilityLabel={`${sparks.length} Spark${sparks.length > 1 ? 's' : ''}`}>
+        <Tap onPress={() => router.push(`/profile/${sparks[0]}`)} scaleTo={0.98} style={[styles.pill, styles.spark]} accessibilityLabel={`${sparks.length} mutual Crush${sparks.length > 1 ? 'es' : ''}`}>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
             <Heart size={13} color="#FF3D6E" fill="#FF3D6E" />
             <T v="caption" color="#D92D5A" weight="800" style={{ marginLeft: 4, letterSpacing: 0.8 }}>
-              SPARKS
+              MUTUAL
             </T>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>

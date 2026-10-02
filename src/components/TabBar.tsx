@@ -3,11 +3,13 @@ import { Flame, LayoutGrid, LucideIcon, Moon, Orbit, User } from 'lucide-react-n
 import { StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { TAB_BAR_HEIGHT, TAB_BAR_MARGIN } from '@/hooks/useLayout';
+import { LinearGradient } from 'expo-linear-gradient';
+
+import { TAB_BAR_HEIGHT } from '@/hooks/useLayout';
 import { useUnseenChanges } from '@/hooks/useGraph';
 import { selectRequests, selectUnread, useChat } from '@/store/useChat';
 import { useChimp } from '@/store/useChimp';
-import { BOARD_THEMES, colors, shadow } from '@/theme';
+import { BOARD_THEMES, colors, layout, navBottomInset, night, shadow } from '@/theme';
 import { Tap } from './ui/Tap';
 import { T } from './ui/Text';
 
@@ -35,21 +37,30 @@ export function TabBar({ state, navigation }: BottomTabBarProps) {
   const openLoops = useChimp((s) => s.openLoops.filter((l) => l.status === 'active' || l.status === 'progress').length);
   // Phase 6B: unread messages and new Message Requests also light the You dot.
   const unreadChats = useChat((c) => selectUnread(c) + selectRequests(c));
+  // Phase 7B: and someone asking to connect.
+  const connectRequests = useChimp((s) => Object.keys(s.incomingConnects ?? {}).length);
 
   const activeColor = dark ? BOARD_THEMES.neonNight.primary : colors.accent;
   const idleColor = dark ? 'rgba(255,255,255,0.72)' : colors.inkMuted;
 
   return (
-    <View pointerEvents="box-none" style={[styles.wrap, { paddingBottom: Math.max(insets.bottom - 8, 8) + TAB_BAR_MARGIN * 0.2 }]}>
-      <View style={[styles.bar, dark ? styles.barDark : styles.barLight]}>
+    <View pointerEvents="box-none" style={[styles.wrap, { paddingBottom: navBottomInset(insets.bottom) }]}>
+      {/* Phase 7C: content scrolls under the bar, never visibly around or below it. */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={dark ? ['rgba(7,6,10,0)', night.bg] : ['rgba(245,247,251,0)', colors.bg]}
+        locations={[0, 0.45]}
+        style={[StyleSheet.absoluteFill, { top: -18 }]}
+      />
+      <View style={[styles.bar, dark ? styles.barDark : styles.barLight]} testID="tab-bar">
         {state.routes.map((route, index) => {
           const meta = TABS[route.name];
           if (!meta) return null;
           const focused = state.index === index;
-          const night = route.name === 'after-dark';
-          const color = focused ? (night ? BOARD_THEMES.neonNight.primary : activeColor) : idleColor;
+          const nightTab = route.name === 'after-dark';
+          const color = focused ? (nightTab ? BOARD_THEMES.neonNight.primary : activeColor) : idleColor;
           const { Icon } = meta;
-          const showDot = route.name === 'you' && (hasFreshPeople || openLoops > 0 || unreadChats > 0) && !focused;
+          const showDot = route.name === 'you' && (hasFreshPeople || openLoops > 0 || unreadChats > 0 || connectRequests > 0) && !focused;
           return (
             <Tap
               key={route.key}
@@ -58,7 +69,7 @@ export function TabBar({ state, navigation }: BottomTabBarProps) {
               accessibilityState={{ selected: focused }}
               haptic="select"
               scaleTo={0.92}
-              style={[styles.item, focused && night && styles.nightActive]}
+              style={styles.item}
               onPress={() => {
                 const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
                 if (!focused && !event.defaultPrevented) navigation.navigate(route.name, route.params);
@@ -85,10 +96,10 @@ export function TabBar({ state, navigation }: BottomTabBarProps) {
 }
 
 const styles = StyleSheet.create({
-  wrap: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 14 },
+  wrap: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: layout.navSideMargin },
   bar: {
     height: TAB_BAR_HEIGHT,
-    borderRadius: 28,
+    borderRadius: layout.navRadius,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-around',
@@ -105,6 +116,5 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 10 },
   },
   item: { flex: 1, alignItems: 'center', justifyContent: 'center', height: TAB_BAR_HEIGHT - 12, marginHorizontal: 0, borderRadius: 20, paddingHorizontal: 0 },
-  nightActive: { backgroundColor: 'rgba(255,46,136,0.14)' },
   dot: { position: 'absolute', top: -1, right: -4, width: 10, height: 10, borderRadius: 5, borderWidth: 2 },
 });

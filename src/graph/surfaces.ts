@@ -17,7 +17,9 @@ import { ds } from '@/services/dataset';
 import { repo } from '@/services/repository';
 import type { Board, BuzzItem, DriftItem, EntityRef, HappeningItem, ImageSrc, Post, Reason, Scored, Story } from '@/types/models';
 
-import { HAPPENING, NEGATIVE, SURFACE_WEIGHTS, TRENDING } from './config';
+import { exposureFor } from '@/store/useExposure';
+
+import { HAPPENING, INTELLIGENCE, NEGATIVE, SIGNALS, SURFACE_WEIGHTS, TRENDING } from './config';
 import { loopProgress } from './loops';
 import {
   boardEvidence,
@@ -39,6 +41,8 @@ import {
   sortReasons,
   tiebreak,
 } from './relevance';
+import { combine, confidenceOf, exposurePenalties, type Opportunity } from './signals';
+import { ageTiming, intentFor, momentumFor } from './time';
 import { freshCount, touches, unseenChanges } from './touch';
 
 // ─── After Dark isolation ───────────────────────────────────────────────────
@@ -246,7 +250,8 @@ export const createdMs = (item: { createdAtMs?: number; ageHours: number }, now 
 /** A Buzz's like total: everyone else's (the backend's real count) plus yours. */
 export const totalLikes = (ctx: GraphContext, b: BuzzItem) => b.likeCount + (ctx.s.buzzLikes[b.id] ? 1 : 0);
 
-export function rankBuzz(ctx: GraphContext, tab: BuzzTab): Scored<BuzzItem>[] {
+/** `signals: false` = the plain graph score (Buzz → Drift interleaves it with Drift's own scores). */
+export function rankBuzz(ctx: GraphContext, tab: BuzzTab, opts?: { signals?: boolean }): Scored<BuzzItem>[] {
   const { s } = ctx;
   const neg = negativeFeedback(ctx);
   const visible = repo
@@ -268,8 +273,45 @@ export function rankBuzz(ctx: GraphContext, tab: BuzzTab): Scored<BuzzItem>[] {
     // Deliberately simple for now: most likes first (real totals, incl. yours), then newest.
     return scored.sort((a, b) => totalLikes(ctx, b.item) - totalLikes(ctx, a.item) || createdMs(b.item, now) - createdMs(a.item, now));
   }
-  // For You: the graph's ranking (with its freshness boost), never purely chronological.
-  return scored.sort((a, b) => b.score - a.score);
+  // For You: the graph's ranking, never purely chronological.
+  if (!INTELLIGENCE.buzzForYou || opts?.signals === false) return scored.sort((a, b) => b.score - a.score);
+  // Phase 7C: the same parts as decomposed signals, plus timing, intent and exposure.
+  const exp = exposureFor(ds().me.id);
+  return scored
+    .map((x) => {
+      const o = buzzOpportunity(ctx, x, exp);
+      return { ...x, score: Math.round((o.total + tiebreak(x.item.id)) * 100) / 100, opportunity: o };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+/**
+ * Phase 7C: one Buzz as an opportunity. Relevance and relationship come from
+ * the graph parts scoreContent already computed (weights from
+ * SURFACE_WEIGHTS.buzz), timing from the post's age (half-life) and your
+ * momentum on its interests, the dislike penalty stays a penalty.
+ */
+export function buzzOpportunity(ctx: GraphContext, x: Scored<BuzzItem>, exp = exposureFor(ds().me.id)): Opportunity {
+  const { s } = ctx;
+  const b = x.item;
+  const p = x.parts ?? {};
+  const w = SURFACE_WEIGHTS.buzz;
+  const interests = itemInterests(b.boardId, b.interests);
+  const ref: EntityRef = { kind: 'buzz', id: b.id };
+  const refs: EntityRef[] = [ref, { kind: 'board', id: b.boardId }];
+  const intent = Math.max(intentFor(s.activity, ctx.now, { refs, interests }), (p.loop ?? 0) >= 0.8 ? p.loop : 0);
+  const e = exposurePenalties(exp, `buzz:${b.id}`, { activity: s.activity, refs: [ref], intent, now: ctx.now });
+  const fresh = freshCount(s.changes, ref);
+  const signals = {
+    relevance: (w.interest * (p.interest ?? 0) + w.loop * (p.loop ?? 0) + w.editorial * (p.editorial ?? 0)) / (w.interest + w.loop + w.editorial),
+    relationship: (w.relationship * (p.relationship ?? 0) + w.social * (p.social ?? 0)) / (w.relationship + w.social),
+    timing: Math.min(1, 0.75 * ageTiming(b.ageHours) + 0.25 * momentumFor(ctx.momentum(), interests) + 0.3 * fresh),
+    intent,
+    actionability: b.kind === 'poll' && !s.buzzVotes?.[b.id] ? 1 : b.kind === 'news' ? 0.3 : 0.5,
+    novelty: e.seenBefore ? 0.3 : 1,
+    confidence: confidenceOf([p.interest ?? 0, p.relationship ?? 0, p.social ?? 0, p.loop ?? 0]),
+  };
+  return combine(signals, SIGNALS.buzz, { repetition: e.repetition, saturation: e.saturation, extraPoints: p.penalty ?? 0 });
 }
 
 // ─── Board posts (Phase 5: Living Worlds use the same scorer) ─────────────
@@ -401,7 +443,7 @@ export function buildDriftFeed(ctx: GraphContext, limit = 60): FeedEntry[] {
     clip: d.kind === 'video' ? { url: d.clipSource, poster: d.image, durationMs: d.durationSec ? d.durationSec * 1000 : undefined } : undefined,
     likeCount: d.likeCount + (ctx.s.driftLikes[d.id] ? 1 : 0),
   }));
-  const photos: FeedEntry[] = rankBuzz(ctx, 'forYou')
+  const photos: FeedEntry[] = rankBuzz(ctx, 'forYou', { signals: false })
     .filter(({ item: b }) => b.kind !== 'news' && !ctx.s.buzzDislikes[b.id] && (b.video || b.image || b.images?.length))
     .map(({ item: b, score, reasons }) => ({
       key: `buzz:${b.id}`,
@@ -501,7 +543,7 @@ export function buildHappening(ctx: GraphContext): HappeningItem[] {
     if (match.spark) {
       // Never who chose first; just that it's mutual, and what you share.
       const ctxLines = match.openers.filter((o) => !mentionsNight(o.context) && !mentionsNight(o.draft)).map((o) => o.context);
-      items.push({ id: `sp:${person.id}`, kind: 'spark', title: `You and ${name} have a Spark`, body: 'Start from something you share.', why: [...ctxLines, ...why].slice(0, 3), ref, image: person.avatar, people: [person.id], score: 99 });
+      items.push({ id: `sp:${person.id}`, kind: 'spark', title: `You and ${name} have a mutual Crush`, body: 'Start from something you share.', why: [...ctxLines, ...why].slice(0, 3), ref, image: person.avatar, people: [person.id], score: 99 });
       continue;
     }
     if (s.connections[person.id]) continue;
@@ -547,10 +589,49 @@ export function buildHappening(ctx: GraphContext): HappeningItem[] {
     const prev = byRef.get(k);
     if (!prev || it.score > prev.score) byRef.set(k, it);
   }
-  return [...byRef.values()]
-    .filter((it) => it.why.length > 0 && it.score >= HAPPENING.minScore)
+  const kept = [...byRef.values()].filter((it) => it.why.length > 0 && it.score >= HAPPENING.minScore);
+  if (!INTELLIGENCE.happening) return kept.sort((a, b) => b.score - a.score).slice(0, HAPPENING.maxItems);
+  // Phase 7C: "what changed in my world?" — rank by the decomposed signals,
+  // keeping the pre-7C score as `selection.base` (reversible, debuggable).
+  const exp = exposureFor(ds().me.id);
+  return kept
+    .map((it) => ({ ...it, ...happeningSelection(ctx, it, exp) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, HAPPENING.maxItems);
+}
+
+const HAPPENING_TIMING_HOURS = 48;
+
+/** Phase 7C: one Happening item's signals → its new score and the stored selection. */
+export function happeningSelection(ctx: GraphContext, it: HappeningItem, exp = exposureFor(ds().me.id)): Pick<HappeningItem, 'score' | 'selection'> {
+  const { s } = ctx;
+  const change = it.kind === 'change' ? s.changes.find((c) => `ch:${c.id}` === it.id) : undefined;
+  const refs: EntityRef[] = [it.ref];
+  const loop = it.kind === 'loop' ? s.openLoops.find((l) => l.id === it.ref.id) : undefined;
+  const interests = loop?.interests ?? (it.ref.kind === 'board' ? repo.board(it.ref.id)?.interests ?? [] : it.ref.kind === 'move' ? repo.move(it.ref.id)?.interests ?? [] : []);
+  const intent = Math.max(
+    it.kind === 'loop' || it.kind === 'spark' ? 1 : 0,
+    it.kind === 'plan' ? 0.8 : 0,
+    intentFor(s.activity, ctx.now, { refs, interests }),
+  );
+  const e = exposurePenalties(exp, `happening:${it.ref.kind}:${it.ref.id}`, { activity: s.activity, refs, intent, now: ctx.now });
+  const timing = change
+    ? Math.pow(0.5, Math.max(0, ctx.now - change.createdAt) / (HAPPENING_TIMING_HOURS * 3_600_000))
+    : it.kind === 'spark' || it.kind === 'plan'
+      ? 1
+      : Math.max(momentumFor(ctx.momentum(), interests), it.kind === 'loop' ? 0.5 : 0.3);
+  const known = (it.people ?? []).filter((id) => s.connections[id] || s.following[id]).length;
+  const signals = {
+    relevance: clamp01(it.score / 100),
+    timing,
+    relationship: clamp01(known / 2 + (it.kind === 'spark' ? 1 : 0)),
+    intent,
+    actionability: it.kind === 'loop' || it.kind === 'move' || it.kind === 'plan' || it.kind === 'spark' || it.kind === 'people' ? 1 : 0.5,
+    novelty: e.seenBefore ? 0.4 : change && !change.seen ? 1 : 0.7,
+    confidence: confidenceOf([it.why.length >= 1 ? 1 : 0, it.why.length >= 2 ? 1 : 0, it.why.length >= 3 ? 1 : 0], 3),
+  };
+  const o = combine(signals, SIGNALS.happening, { repetition: e.repetition, saturation: e.saturation });
+  return { score: o.total + tiebreak(it.id), selection: { base: it.score, total: o.total, signals: o.signals, penalties: { repetition: o.penalties.repetition, saturation: o.penalties.saturation } } };
 }
 
 export interface HappeningNode {

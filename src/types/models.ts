@@ -814,6 +814,11 @@ export interface HappeningItem {
   image?: ImageSrc;
   people?: ID[];
   score: number;
+  /**
+   * Phase 7C: why Happening selected it (decomposed signals, Graph Debug only).
+   * `base` is the pre-7C score, so turning INTELLIGENCE.happening off restores the old order.
+   */
+  selection?: { base: number; total: number; signals: Record<string, number>; penalties: Record<string, number> };
 }
 
 export interface Notification {

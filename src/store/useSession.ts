@@ -19,6 +19,7 @@ import { create } from 'zustand';
 
 import { isBackendConfigured } from '@/lib/supabase';
 import { currentUserId, deleteMyAccount, fetchAccess, onSessionEnded, signOutBackend, signOutLocal } from '@/services/backend/auth';
+import { diag, userMessage, withRetry } from '@/services/backend/errors';
 import { type ProfilePatch, type RealRaw, fetchLikeTotals, loadRealWorld, mapRealWorld, saveProfile as saveProfileRow } from '@/services/backend/content';
 import { clearRealCache, readRealCache, writeRealCache } from '@/services/backend/realCache';
 import type { ProfileRow } from '@/services/backend/mappers';
@@ -27,6 +28,8 @@ import { demoDataset, ds, emptyDataset, setDataset } from '@/services/dataset';
 import type { AccountMode, OpenTo } from '@/types/models';
 import { startupMark } from '@/utils/startup';
 import { emptyCreations, realInitialData, useChimp } from './useChimp';
+import { useExposure } from './useExposure';
+import { stopAnalytics } from '@/services/analytics';
 
 export type SessionStatus = 'booting' | 'signedOut' | 'onboarding' | 'switching' | 'ready';
 export type OnboardingStep = 'profile-setup' | 'phrase' | 'interests' | 'open-to';
@@ -290,7 +293,12 @@ export const useSession = create<SessionState>((set, get) => {
       set({ uid, email, developer: false });
       void loadAccess(uid);
       const { fetchMyProfile } = await import('@/services/backend/content');
-      const profile = await fetchMyProfile(uid);
+      // Phase 7B: the first request after a fresh sign-in can hit Supabase's
+      // transient "JWT issued at future" (PGRST303), or a flaky connection.
+      // Retry those briefly; a real failure still fails (and is shown in plain words).
+      const started = Date.now();
+      const profile = await withRetry(() => fetchMyProfile(uid), { label: 'bootstrap profile' });
+      diag('bootstrap profile', { ms: Date.now() - started, exists: !!profile });
       set({ profile });
       if (nextStep(profile)) {
         set({ status: 'onboarding', mode: 'real' });
@@ -322,7 +330,7 @@ export const useSession = create<SessionState>((set, get) => {
       if (get().mode !== 'real' || !uid) return;
       set({ syncing: true });
       try {
-        const world = await loadRealWorld(uid);
+        const world = await withRetry(() => loadRealWorld(uid), { label: 'world' });
         // Signed out / switched while this was loading: drop it.
         if (get().mode !== 'real' || get().uid !== uid) return;
         realData.applyLoaded(world.profile, world.parts, world.followerCount);
@@ -356,7 +364,7 @@ export const useSession = create<SessionState>((set, get) => {
         });
         set({ error: undefined });
       } catch (e) {
-        set({ error: e instanceof Error ? e.message : String(e) });
+        set({ error: userMessage(e, 'Couldn’t refresh. Pull to try again.') });
         realData.markLoaded();
       } finally {
         set({ syncing: false });
@@ -400,10 +408,16 @@ export const useSession = create<SessionState>((set, get) => {
         // and this account's cached content (Phase 6C).
         const leaving = get().uid;
         if (get().mode === 'real') {
+          // Phase 7C: while the session is still valid — this phone stops getting
+          // this account's notifications, and queued product events go out.
+          await stopAnalytics();
+          await import('@/services/push').then((m) => m.unregisterPush()).catch(() => {});
           await signOutBackend().catch((e) => trace('supabase signOut failed', { error: String(e) }));
           if (leaving) await clearRealCache(leaving);
         }
         realData.stopReal();
+        // Phase 7C: what this account was shown stays with this account.
+        useExposure.getState().reset();
         await AsyncStorage.removeItem(MODE_KEY);
         await AsyncStorage.removeItem(REVIEW_KEY);
         // Park the local store on the demo bucket with the matching dataset; nothing real stays in memory.
@@ -425,7 +439,10 @@ export const useSession = create<SessionState>((set, get) => {
       const uid = get().uid;
       if (get().mode !== 'real' || !uid) throw new Error('Sign in to the account you want to delete.');
       // 1. The server deletes the account (or throws, and nothing here changes).
+      await stopAnalytics();
       const result = await deleteMyAccount(transferWorlds);
+      // The server already removed this account's devices (cascade); forget the token here too.
+      await import('@/services/push').then((m) => m.unregisterPush()).catch(() => {});
       // 2. Forget it on this phone: session, cached world, local store bucket.
       await transition('account deleted', async () => {
         unsubDemo?.();
@@ -433,6 +450,7 @@ export const useSession = create<SessionState>((set, get) => {
         realData.stopReal();
         await signOutLocal().catch((e) => trace('local signOut failed', { error: String(e) }));
         await clearRealCache(uid);
+        useExposure.getState().reset();
         await AsyncStorage.removeItem(MODE_KEY);
         setDataset(emptyDataset());
         await switchBucket(DEMO_BUCKET, () => ({}));

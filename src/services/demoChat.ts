@@ -9,11 +9,13 @@
 import type { ChatApi } from '@/services/chatApi';
 import type { ConversationRow, GroupRole, LoopRow, MemberRow, MemberStatus, MessageRow, PingKind, PingMatchRow, PingRow, ReactionRow, SameBrainRow } from '@/services/backend/chat';
 import { ME_ID } from '@/data/users';
+import { applyPlanPatch } from '@/utils/afterDark';
 import { pingsCompatible } from '@/utils/messaging';
 
 interface Conv {
   id: string;
-  kind: 'direct' | 'group';
+  /** Phase 7A: 'vibe' = an After Dark Vibe's private chat (never listed in Messages). */
+  kind: 'direct' | 'group' | 'vibe';
   title: string | null;
   avatar: string | null;
   created_by: string;
@@ -22,8 +24,10 @@ interface Conv {
 
 const REACTIONS = ['❤️', '😂', '🔥', '👍', '😮', '😭'];
 let seq = 0;
-/** Demo photos never leave the phone: media id → local uri. */
-const photos = new Map<string, { url: string; aspect?: number }>();
+/** Demo photos never leave the phone: media id → local uri (and what kind of file it is). */
+const photos = new Map<string, { url: string; aspect?: number; kind?: 'image' | 'audio' }>();
+/** Phase 7A: a view-once photo's file is kept off the message (view_once_media in 0007). */
+const onceMedia = new Map<string, string>();
 const nid = (p: string) => `${p}_${Date.now().toString(36)}_${(seq++).toString(36)}`;
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
 const M = 60 * 1000;
@@ -72,7 +76,63 @@ const d = () => {
 export function resetDemoChat() {
   db = null;
   photos.clear();
+  onceMedia.clear();
+  for (const fn of resetHooks) fn();
 }
+
+// ─── Phase 7A: the Demo After Dark backend (services/demoAfterDark.ts) keeps
+// its Vibes' chats here, so a Vibe chat runs on exactly the same chat code.
+// It decides who may send what in a Vibe (mirror of vibe_can_send in 0007). ──
+
+type VibeGate = (cid: string, what: 'text' | 'photo' | 'voice' | 'other', viewOnce: boolean) => string | null;
+let vibeGate: VibeGate = () => 'This Vibe isn’t active.';
+const resetHooks = new Set<() => void>();
+
+export const demoChatVibes = {
+  /** Who may send what in a Vibe chat: an error message, or null when allowed. */
+  setGate(fn: VibeGate) {
+    vibeGate = fn;
+  },
+  /** Called when the Demo chats start over, so the Vibes start over too. */
+  onReset(fn: () => void) {
+    resetHooks.add(fn);
+  },
+  addConversation(cid: string, createdBy: string, members: { user_id: string; joined_at: string; last_read_at: string }[], updatedAt: string) {
+    if (d().convs.some((c) => c.id === cid)) return;
+    d().convs.push({ id: cid, kind: 'vibe', title: null, avatar: null, created_by: createdBy, updated_at: updatedAt });
+    d().members.push(...members.map((m) => ({ conversation_id: cid, user_id: m.user_id, role: 'member' as GroupRole, status: 'active' as MemberStatus, joined_at: m.joined_at, last_read_at: m.last_read_at })));
+  },
+  addMessage(row: MessageRow, media?: { url: string; aspect?: number }) {
+    if (media && row.media_id) photos.set(row.media_id, { ...media, kind: row.message_type === 'voice' ? 'audio' : 'image' });
+    if (row.view_once && row.media_id) {
+      onceMedia.set(row.id, row.media_id);
+      row = { ...row, media_id: null };
+    }
+    d().messages.push(row);
+    d().messages.sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const c = conv(row.conversation_id);
+    if (c && c.updated_at < row.created_at) c.updated_at = row.created_at;
+  },
+  addLoop(row: LoopRow) {
+    d().loops.unshift(row);
+  },
+  /** An ended Vibe: its chat is closed for good (messages stay readable, nothing new). */
+  messages: (cid: string) => d().messages.filter((m) => m.conversation_id === cid && !m.deleted_at),
+  loops: (cids: string[]) => d().loops.filter((l) => cids.includes(l.conversation_id)),
+  lastRead: (cid: string, uid = ME_ID) => d().members.find((m) => m.conversation_id === cid && m.user_id === uid)?.last_read_at,
+  /** Ending a Vibe closes its open Plans and drops unmatched Pings (end_vibe in 0007). */
+  closePlans(cid: string) {
+    const now = new Date().toISOString();
+    for (const l of d().loops) if (l.conversation_id === cid && l.plan_state && !['closed', 'completed'].includes(l.plan_state)) Object.assign(l, { plan_state: 'closed', updated_at: now });
+    d().pings = d().pings.filter((p) => !(p.conversation_id === cid && !p.match_id));
+  },
+  removeConversation(cid: string) {
+    d().convs = d().convs.filter((c) => c.id !== cid);
+    d().members = d().members.filter((m) => m.conversation_id !== cid);
+    d().messages = d().messages.filter((m) => m.conversation_id !== cid);
+    d().loops = d().loops.filter((l) => l.conversation_id !== cid);
+  },
+};
 
 const role = (cid: string, uid = ME_ID) => d().members.find((m) => m.conversation_id === cid && m.user_id === uid && m.status !== 'left')?.role;
 const isMember = (cid: string) => !!role(cid);
@@ -80,19 +140,28 @@ const deny = (msg: string) => {
   throw new Error(msg);
 };
 const conv = (cid: string) => d().convs.find((c) => c.id === cid);
+const isVibe = (cid: string) => conv(cid)?.kind === 'vibe';
+/** Phase 7A: a Vibe chat only takes part while the Vibe is active (can_participate in 0007). */
+const participate = (cid: string, msg: string) => {
+  if (!isMember(cid)) deny(msg);
+  if (isVibe(cid)) {
+    const why = vibeGate(cid, 'other', false);
+    if (why) deny(why);
+  }
+};
 
 export const demoChatApi: ChatApi = {
   demo: true,
   fetchConversations: async () =>
     d()
-      .convs.filter((c) => isMember(c.id))
+      .convs.filter((c) => c.kind !== 'vibe' && isMember(c.id))
       .map((c): ConversationRow => {
         const msgs = d().messages.filter((m) => m.conversation_id === c.id && !m.deleted_at);
         const last = msgs[msgs.length - 1];
         const me = d().members.find((m) => m.conversation_id === c.id && m.user_id === ME_ID)!;
         return {
           conversation_id: c.id,
-          kind: c.kind,
+          kind: c.kind as 'direct' | 'group',
           other_id: null,
           title: c.title,
           avatar_url: c.avatar,
@@ -110,11 +179,35 @@ export const demoChatApi: ChatApi = {
         };
       }),
   fetchMessages: async (cid) => d().messages.filter((m) => m.conversation_id === cid && !m.deleted_at),
-  sendMessage: async (uid, cid, clientId, body, media, replyTo) => {
+  sendMessage: async (uid, cid, clientId, body, media, replyTo, extra) => {
     if (!isMember(cid)) deny('You’re not in this chat.');
     const dup = d().messages.find((m) => m.conversation_id === cid && m.client_id === clientId);
     if (dup) return dup;
-    const row: MessageRow = { id: nid('m'), conversation_id: cid, sender_id: uid, body: body?.trim() || null, media_id: media?.id ?? null, message_type: media ? 'photo' : 'text', client_id: clientId, created_at: new Date().toISOString(), deleted_at: null, reply_to: replyTo && d().messages.some((m) => m.id === replyTo && m.conversation_id === cid) ? replyTo : null };
+    const type = media ? extra?.kind ?? 'photo' : 'text';
+    const viewOnce = !!extra?.viewOnce;
+    if (type === 'voice' && !media) deny('A voice note needs its recording.');
+    if (viewOnce && type !== 'photo') deny('Only photos can be view-once.');
+    // The file must be my own upload, of the kind the message says (0007's guard).
+    if (media && photos.get(media.id)?.kind !== (type === 'voice' ? 'audio' : 'image')) deny('That file can’t be sent as this message.');
+    if (isVibe(cid)) {
+      const why = vibeGate(cid, type, viewOnce);
+      if (why) deny(why);
+    } else if (type === 'voice' || viewOnce) deny('Voice notes and view-once photos are only in After Dark.');
+    const row: MessageRow = {
+      id: nid('m'),
+      conversation_id: cid,
+      sender_id: uid,
+      body: type === 'voice' ? null : body?.trim() || null,
+      media_id: viewOnce ? null : media?.id ?? null,
+      message_type: type,
+      client_id: clientId,
+      created_at: new Date().toISOString(),
+      deleted_at: null,
+      reply_to: replyTo && d().messages.some((m) => m.id === replyTo && m.conversation_id === cid) ? replyTo : null,
+      ...(viewOnce ? { view_once: true, viewed_at: null } : {}),
+      ...(type === 'voice' && extra?.durationMs != null ? { duration_ms: Math.round(extra.durationMs) } : {}),
+    };
+    if (viewOnce && media) onceMedia.set(row.id, media.id);
     d().messages.push(row);
     conv(cid)!.updated_at = row.created_at;
     return row;
@@ -191,6 +284,7 @@ export const demoChatApi: ChatApi = {
   react: async (messageId, emoji, on) => {
     const m = d().messages.find((x) => x.id === messageId);
     if (!m || !isMember(m.conversation_id)) deny('You can’t react here.');
+    participate(m!.conversation_id, 'You can’t react here.');
     if (!on) {
       d().reactions = d().reactions.filter((r) => !(r.message_id === messageId && r.user_id === ME_ID && r.emoji === emoji));
       return { same_brain: false };
@@ -210,7 +304,7 @@ export const demoChatApi: ChatApi = {
   },
   fetchSameBrain: async (cid) => d().brains.filter((b) => b.conversation_id === cid),
   sendPing: async (cid, kind: PingKind, text) => {
-    if (!isMember(cid)) deny('You can’t Ping here.');
+    participate(cid, 'You can’t Ping here.');
     const now = Date.now();
     d().pings = d().pings.filter((p) => !(p.conversation_id === cid && ((p.sender_id === ME_ID && !p.match_id) || (!p.match_id && Date.parse(p.expires_at) <= now))));
     const mine: PingRow = { id: nid('p'), conversation_id: cid, sender_id: ME_ID, kind, custom_text: kind === 'custom' ? text?.trim() || null : null, created_at: new Date().toISOString(), expires_at: new Date(now + 24 * 3600 * 1000).toISOString(), match_id: null };
@@ -235,17 +329,23 @@ export const demoChatApi: ChatApi = {
   fetchPingMatches: async (cid) => d().matches.filter((m) => m.conversation_id === cid).reverse(),
   fetchLoops: async (cid) => d().loops.filter((l) => l.conversation_id === cid),
   createLoop: async (uid, cid, title, sourceMessageId, extra) => {
-    if (!isMember(cid)) deny('You’re not in this chat.');
+    participate(cid, 'You’re not in this chat.');
+    if (extra?.plan_state != null && !isVibe(cid)) deny('Plans live in After Dark Vibes.');
     const now = new Date().toISOString();
     const row: LoopRow = { id: nid('l'), conversation_id: cid, source_message_id: sourceMessageId ?? null, created_by: uid, title: title.trim(), note: null, status: 'open', target_date: null, location_text: null, board_id: null, ...(extra ?? {}), created_at: now, updated_at: now, resolved_at: null };
+    if (row.plan_state != null) Object.assign(row, { plan_state: 'proposed', plan_by: uid });
     d().loops.unshift(row);
     return row;
   },
   updateLoop: async (id, patch) => {
     const l = d().loops.find((x) => x.id === id);
     if (!l || !isMember(l.conversation_id)) deny('Open Loop not found.');
+    participate(l!.conversation_id, 'Open Loop not found.');
+    if (patch.plan_state != null && !isVibe(l!.conversation_id)) deny('Plans live in After Dark Vibes.');
     const wasOpen = l!.status === 'open';
-    Object.assign(l!, patch, { updated_at: new Date().toISOString() });
+    const planned = applyPlanPatch(l!, patch, ME_ID);
+    if ('error' in planned) deny(planned.error);
+    Object.assign(l!, (planned as { row: LoopRow }).row, { updated_at: new Date().toISOString() });
     if (patch.status === 'resolved' && wasOpen) l!.resolved_at = new Date().toISOString();
     if (patch.status === 'open') l!.resolved_at = null;
     return { ...l! };
@@ -253,15 +353,38 @@ export const demoChatApi: ChatApi = {
   deleteLoop: async (id) => {
     const l = d().loops.find((x) => x.id === id);
     if (!l) return;
+    if (isVibe(l.conversation_id)) participate(l.conversation_id, 'Open Loop not found.');
     if (l.created_by !== ME_ID && !['owner', 'admin'].includes(role(l.conversation_id) ?? '')) deny('Only the person who made it (or the group’s owner) can delete it.');
     d().loops = d().loops.filter((x) => x.id !== id);
+  },
+  viewOnceAvailable: async () => true,
+  // Phase 7A: open a view-once photo — only its recipient, only once.
+  openViewOnce: async (messageId) => {
+    const m = d().messages.find((x) => x.id === messageId);
+    if (!m || !isMember(m.conversation_id) || !m.view_once) deny('Photo not found.');
+    if (m!.sender_id === ME_ID) deny('Only the person you sent it to can open it.');
+    const file = onceMedia.get(m!.id);
+    if (m!.viewed_at || m!.deleted_at || !file) deny('This photo was already opened.');
+    // Only while the Vibe is active and nobody is blocked.
+    const why = vibeGate(m!.conversation_id, 'other', false);
+    if (why) deny(why);
+    const url = photos.get(file!)?.url ?? null;
+    photos.delete(file!);
+    onceMedia.delete(m!.id);
+    Object.assign(m!, { viewed_at: new Date().toISOString() });
+    return url;
+  },
+  uploadAudio: async (_uid, uri) => {
+    const id = nid('media');
+    photos.set(id, { url: uri, kind: 'audio' });
+    return { id, url: uri };
   },
   subscribeInbox: () => () => undefined,
   subscribeConversation: () => () => undefined,
   uploadPhoto: async (_uid, img) => {
     const id = nid('media');
     const p = { url: img.uri, aspect: img.width && img.height ? img.width / img.height : undefined };
-    photos.set(id, p);
+    photos.set(id, { ...p, kind: 'image' });
     return { id, ...p };
   },
   avatarUrl: (path) => path ?? undefined,

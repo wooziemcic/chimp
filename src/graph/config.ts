@@ -137,6 +137,15 @@ export const RELEVANCE = {
     following: 0.6,
     /** Someone you haven't met but who is a strong match. */
     strongMatch: 0.45,
+    /**
+     * Phase 7A: someone you have a PRIVATE Crush on. A deliberately small,
+     * silent personalisation signal: it never adds a reason or a name to any
+     * sentence (so nothing on screen can reveal the Crush), and on its own it
+     * is under a tenth of a full social score.
+     */
+    privateCrush: 0.15,
+    /** Same signal for people suggestions, in matchScore points (scale ~30–100). */
+    privateCrushPeople: 1,
     /** Sum needed for a full score. */
     full: 2,
   },
@@ -278,6 +287,118 @@ export const EDITION = {
   heatWeight: 4,
   /** Cover/lead bias per format. */
   lead: { news: 4, drift: 0, post: -2 },
+};
+
+// ─── Opportunity signals (Phase 7C) ─────────────────────────────────────────
+
+/**
+ * Phase 7C: every ranked thing (a person, a Buzz, a Happening change, a
+ * Discover card) is scored from the same decomposed signals, each 0..1:
+ *
+ *   opportunity = Σ weight × signal  −  Σ penalty × penaltySignal     (× 100)
+ *
+ *   relevance      does it fit who you are (interests, Worlds, match parts)
+ *   timing         is it relevant NOW (recency half-lives + interest momentum)
+ *   relationship   people / Worlds you already have a tie with
+ *   intent         things you said you want (Open Loops, Open To, saves, RSVPs)
+ *   actionability  is there something concrete to do (an opener, a poll, a plan)
+ *   novelty        new to you (not already followed, not seen before)
+ *   confidence     how much evidence the score rests on
+ *   repetition     you saw it in an earlier sitting and didn't act
+ *   saturation     you've seen it in many sittings without acting
+ *   safety         a gate, not a weight: unsafe = never ranked
+ *
+ * Weights per surface sum to 1. Nothing here is ever shown to people as a
+ * number: the UI only shows plain reasons. No percentages are invented.
+ */
+export const SIGNALS = {
+  people: { relevance: 0.5, relationship: 0.12, timing: 0.12, intent: 0.1, actionability: 0.08, novelty: 0.05, confidence: 0.03 },
+  buzz: { relevance: 0.34, relationship: 0.24, timing: 0.18, intent: 0.08, actionability: 0.06, novelty: 0.06, confidence: 0.04 },
+  happening: { relevance: 0.3, relationship: 0.15, timing: 0.25, intent: 0.15, actionability: 0.08, novelty: 0.05, confidence: 0.02 },
+  discover: { relevance: 0.4, relationship: 0.2, timing: 0.1, intent: 0.15, actionability: 0.05, novelty: 0.08, confidence: 0.02 },
+  /** Points removed at full penalty (score scale 0..100). */
+  penalties: { repetition: 10, saturation: 20 },
+  /**
+   * Strong, recent intent (you saved it, joined its World, opened a loop on
+   * it) cancels up to this share of saturation: relevance can recover.
+   */
+  intentRecovery: 0.75,
+};
+
+/**
+ * Half-life (hours) of each kind of action when it is used as a TIMING
+ * signal. Affinity itself still never decays (it is "static interest");
+ * these half-lives measure "is this interest becoming relevant right now".
+ */
+export const DECAY = {
+  halfLifeHours: {
+    open: 24,
+    storyView: 24,
+    watch: 36,
+    explore: 36,
+    like: 72,
+    vote: 72,
+    dislike: 336,
+    comment: 120,
+    reply: 120,
+    repost: 120,
+    chat: 168,
+    save: 336,
+    interested: 336,
+    rsvp: 504,
+    create: 336,
+    follow: 720,
+    join: 720,
+    connect: 1440,
+    openLoop: 720,
+    resolveLoop: 168,
+  } as Partial<Record<ActivityType, number>>,
+  /** Any action not listed. */
+  defaultHours: 168,
+  /** A Buzz post's own timing (age) half-life. */
+  contentHours: 24,
+};
+
+export const MOMENTUM = {
+  /** Sum of decayed affinity gains on an interest that counts as full momentum. */
+  full: 0.2,
+  /**
+   * Momentum is about THIS WEEK: an action's momentum half-life is its
+   * DECAY half-life capped here (a join still counts as intent for a month,
+   * but as momentum for days).
+   */
+  maxHalfLifeHours: 96,
+  /** Actions that express INTENT (not just attention). */
+  intentTypes: ['save', 'join', 'rsvp', 'interested', 'openLoop', 'follow', 'connect', 'create'] as ActivityType[],
+  /** Sum of decayed intent actions that counts as full intent. */
+  intentFull: 1.5,
+};
+
+/**
+ * Exposure (what you've already been shown). Counted per SITTING, not per
+ * render: two impressions closer than `sittingGapMin` are one sitting.
+ * Rankings read a snapshot taken when a sitting starts, so a list never
+ * reshuffles under your thumb, and nothing from the current sitting counts.
+ */
+export const EXPOSURE = {
+  sittingGapMin: 30,
+  /** Seen in an earlier sitting within this window → repetition (decays). */
+  repeatHalfLifeHours: 24,
+  /** Saturation starts at this many sittings without acting… */
+  saturationFrom: 3,
+  /** …and is full here. */
+  saturationFull: 7,
+  /** Keep the store finite. */
+  maxKeys: 600,
+  maxSelections: 40,
+};
+
+/** Kill switches: false = the pre-7C ordering for that surface (reversible). */
+export const INTELLIGENCE = {
+  people: true,
+  buzzForYou: true,
+  happening: true,
+  discover: true,
 };
 
 // ─── Happening: the horizontal interest graph (Phase 5) ─────────────────────

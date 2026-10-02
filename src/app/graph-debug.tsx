@@ -11,7 +11,8 @@ import { T } from "@/components/ui/Text";
 import { EXAMPLE_BOARDS } from "@/data/examples";
 import { interestById } from "@/data/interests";
 import { describeActivity, editionOrder } from "@/graph/agent";
-import { MATCH } from "@/graph/config";
+import { INTELLIGENCE, MATCH, SIGNALS } from "@/graph/config";
+import { describe, type Opportunity } from "@/graph/signals";
 import { DEMO_IDS, DEMO_STEPS } from "@/graph/demo";
 import { buildHappeningGraph } from "@/graph/happening";
 import {
@@ -36,9 +37,10 @@ import {
 import { useGraphCtx } from "@/hooks/useGraph";
 import { repo } from "@/services/repository";
 import { useChimp } from "@/store/useChimp";
+import { useExposure } from "@/store/useExposure";
 import { useSession } from "@/store/useSession";
 import { colors, radius } from "@/theme";
-import type { Scored } from "@/types/models";
+import type { HappeningItem, Scored } from "@/types/models";
 
 /**
  * Graph Debug — development only (reached from Settings when running in
@@ -78,6 +80,7 @@ function GraphDebugBody() {
     [ctx],
   );
   const people = useMemo(() => rankPeopleCtx(ctx), [ctx]);
+  const exposure = useExposure();
   const buzz = useMemo(() => rankBuzz(ctx, "forYou"), [ctx]);
   const drift = useMemo(() => rankDrift(ctx), [ctx]);
   const happening = useMemo(() => buildHappening(ctx), [ctx]);
@@ -670,6 +673,11 @@ function GraphDebugBody() {
               <T v="caption" color={colors.accent}>
                 {h.why.join(" · ")}
               </T>
+              {h.selection ? (
+                <T v="caption" color={colors.inkMuted}>
+                  {`7C ${describeSelection(h.selection)} · was ${h.selection.base.toFixed(1)}`}
+                </T>
+              ) : null}
             </View>
           ))}
           <T v="caption" color={colors.inkFaint}>
@@ -677,8 +685,32 @@ function GraphDebugBody() {
             World Delta.
           </T>
         </Section>
+        <Section title="Opportunity signals (7C)">
+          <T v="caption" color={colors.inkMuted}>
+            {`Weights · people ${fmtW(SIGNALS.people)}`}
+          </T>
+          <T v="caption" color={colors.inkMuted}>
+            {`buzz ${fmtW(SIGNALS.buzz)} · happening ${fmtW(SIGNALS.happening)} · discover ${fmtW(SIGNALS.discover)}`}
+          </T>
+          <T v="caption" color={colors.inkMuted}>
+            {`Penalties · repetition −${SIGNALS.penalties.repetition} · saturation −${SIGNALS.penalties.saturation} (intent recovers ${Math.round(SIGNALS.intentRecovery * 100)}%) · on: ${Object.entries(INTELLIGENCE).filter(([, v]) => v).map(([k]) => k).join(", ")}`}
+          </T>
+          <T v="caption" color={colors.inkMuted}>
+            {`Exposure · ${Object.keys(exposure.seen).length} things seen · snapshot ${Object.keys(exposure.snapshot.seen).length} · momentum ${Object.entries(ctx.momentum()).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(", ") || "none"}`}
+          </T>
+          {buzz.slice(0, 4).map((x) => (
+            <T key={x.item.id} v="caption" color={colors.ink2}>
+              {`Buzz ${x.item.id} · ${(x as { opportunity?: Opportunity }).opportunity ? describe((x as { opportunity?: Opportunity }).opportunity!) : x.score.toFixed(1)}`}
+            </T>
+          ))}
+          {exposure.selections.slice(0, 5).map((sel) => (
+            <T key={`${sel.key}${sel.at}`} v="caption" color={colors.accent}>
+              {`Selected ${sel.key} · ${sel.total.toFixed(1)} · ${sel.why.slice(0, 2).join(" · ")}`}
+            </T>
+          ))}
+        </Section>
         <Section title="People (match score)">
-          {people.slice(0, 8).map(({ person, match }) => {
+          {people.slice(0, 8).map(({ person, match, opportunity }) => {
             const d =
               baseline?.matches[person.id] !== undefined
                 ? match.matchScore - baseline.matches[person.id]
@@ -720,6 +752,11 @@ function GraphDebugBody() {
                     .map((r) => r.label)
                     .join(" · ")}
                 </T>
+                {opportunity ? (
+                  <T v="caption" color={colors.inkMuted}>
+                    {`7C ${describe(opportunity)}`}
+                  </T>
+                ) : null}
               </View>
             );
           })}
@@ -931,3 +968,14 @@ const styles = StyleSheet.create({
   },
   stepDone: { backgroundColor: colors.accent, borderColor: colors.accent },
 });
+
+const fmtW = (w: Record<string, number>) =>
+  Object.entries(w)
+    .map(([k, v]) => `${k.slice(0, 4)} ${v}`)
+    .join(" ");
+
+function describeSelection(sel: NonNullable<HappeningItem["selection"]>): string {
+  return `${sel.total.toFixed(1)} = ${Object.entries(sel.signals)
+    .map(([k, v]) => `${k.slice(0, 4)} ${v.toFixed(2)}`)
+    .join(" · ")}${sel.penalties.saturation || sel.penalties.repetition ? ` − rep ${sel.penalties.repetition.toFixed(2)} sat ${sel.penalties.saturation.toFixed(2)}` : ""}`;
+}

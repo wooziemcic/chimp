@@ -1,5 +1,5 @@
 import { Caveat_600SemiBold, Caveat_700Bold, useFonts } from '@expo-google-fonts/caveat';
-import { DefaultTheme, Stack, ThemeProvider } from 'expo-router';
+import { DefaultTheme, type Href, router, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { ActivityIndicator, AppState, View } from 'react-native';
@@ -13,8 +13,17 @@ import { isBackendConfigured } from '@/lib/supabase';
 import { useChat } from '@/store/useChat';
 import { realChatApi } from '@/services/chatApi';
 import { demoChatApi } from '@/services/demoChat';
+import { realAfterDarkApi } from '@/services/afterDarkApi';
+import { startLive, stopLive } from '@/services/live';
+import { demoAfterDarkApi, setDemoAfterDarkContext } from '@/services/demoAfterDark';
+import { useAfterDark } from '@/store/useAfterDark';
 import { ME_ID } from '@/data/users';
 import { useChimp } from '@/store/useChimp';
+import { useExposure } from '@/store/useExposure';
+import { ds } from '@/services/dataset';
+import { startAnalytics } from '@/services/analytics';
+import { ensurePushRegistered, installPushHandling, onPendingPush, pendingPush, takePendingPush } from '@/services/push';
+import { OfflineBanner } from '@/components/OfflineBanner';
 import { useSession } from '@/store/useSession';
 import { colors } from '@/theme';
 import { afterFirstPaint, startupMark } from '@/utils/startup';
@@ -52,15 +61,36 @@ export default function RootLayout() {
   // Final messaging patch: the Demo account gets its own in-memory chat backend (never Supabase).
   useEffect(() => {
     if (!appReady) return;
-    const which = mode === 'real' && uid && isBackendConfigured ? { uid, api: realChatApi } : mode === 'demo' ? { uid: ME_ID, api: demoChatApi } : null;
+    const which =
+      mode === 'real' && uid && isBackendConfigured
+        ? { uid, api: realChatApi, ad: realAfterDarkApi }
+        : mode === 'demo'
+          ? { uid: ME_ID, api: demoChatApi, ad: demoAfterDarkApi }
+          : null;
     if (!which) return;
+    // Phase 7A: the Demo After Dark reads what the Demo world already knows (Worlds you joined, connections, Crushes, blocks).
+    if (mode === 'demo') {
+      const flags = (f: Record<string, unknown>) => Object.keys(f).filter((k) => f[k]);
+      setDemoAfterDarkContext({
+        joined: () => flags(useChimp.getState().joined),
+        connections: () => Object.values(useChimp.getState().connections).filter((c) => c.status === 'connected').map((c) => c.userId),
+        crushes: () => flags(useChimp.getState().crushes),
+        blocked: () => flags(useChimp.getState().blocked),
+      });
+    }
     const cancel = afterFirstPaint(() => {
       startupMark('chat started (deferred)');
       void useChat.getState().start(which.uid, which.api);
+      // Phase 7A: After Dark is bound to the same account, but loads nothing until it's opened.
+      useAfterDark.getState().bind(which.uid, which.ad);
+      // Phase 7B: relationship events + foreground / reconnect reconcile (REAL only; Demo never touches Supabase).
+      if (!which.api.demo) startLive(which.uid);
     });
     return () => {
       cancel();
+      stopLive();
       useChat.getState().stop();
+      useAfterDark.getState().stop();
     };
   }, [appReady, mode, uid]);
 
@@ -79,6 +109,75 @@ export default function RootLayout() {
       sub.remove();
     };
   }, [hydrated, appReady]);
+
+  // Phase 7C: notification taps and foreground presentation (installed once).
+  useEffect(
+    () =>
+      installPushHandling(
+        () => useChat.getState().activeId,
+        () => useSession.getState().uid,
+        () => {
+          if (useSession.getState().mode === 'real') void ensurePushRegistered({ ask: 'never' });
+        },
+      ),
+    [],
+  );
+
+  // Phase 7C: a signed-in REAL account registers this phone for pushes (asks
+  // once, after the first screen has painted) and sends product events.
+  // Demo / App Review Demo: neither (they never touch the network for this).
+  useEffect(() => {
+    if (!appReady || mode !== 'real' || !uid || !isBackendConfigured) return;
+    startAnalytics();
+    const cancel = afterFirstPaint(() => void ensurePushRegistered({ ask: 'once' }), 2500);
+    return cancel;
+  }, [appReady, mode, uid]);
+
+  // Phase 7C: open what a tapped notification points at — only once the
+  // session is restored, the right account is signed in and chat has started.
+  useEffect(() => {
+    if (!appReady) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const started = Date.now();
+    const go = () => {
+      const p = pendingPush();
+      if (!p) return;
+      const s = useSession.getState();
+      if (s.mode !== 'real' || !s.uid || (p.for && p.for !== s.uid)) {
+        takePendingPush(); // meant for another account (or the Demo is open): ignore
+        return;
+      }
+      // Wait (up to 6 s) for chat / After Dark to be bound to this account.
+      if (useChat.getState().uid !== s.uid && Date.now() - started < 6000) {
+        timer = setTimeout(go, 250);
+        return;
+      }
+      takePendingPush();
+      router.push(p.target.href as Href);
+    };
+    go();
+    const off = onPendingPush(go);
+    return () => {
+      off();
+      if (timer) clearTimeout(timer);
+    };
+  }, [appReady, mode, uid]);
+
+  // Phase 7C: a new "sitting" starts at launch, on every account change and on
+  // coming back to the app; rankings then see what you were shown before it.
+  useEffect(() => {
+    if (!appReady) return;
+    const refresh = () => useExposure.getState().refresh(ds().me.id);
+    const start = () => (useExposure.persist.hasHydrated() ? refresh() : useExposure.persist.onFinishHydration(refresh));
+    const unsubHydrate = start();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') refresh();
+    });
+    return () => {
+      if (typeof unsubHydrate === 'function') unsubHydrate();
+      sub.remove();
+    };
+  }, [appReady, mode, uid]);
 
   useEffect(() => {
     if (ready) SplashScreen.hideAsync().catch(() => {});
@@ -108,6 +207,10 @@ export default function RootLayout() {
           <Stack.Screen name="profile/[id]" />
           <Stack.Screen name="route/[id]" />
           <Stack.Screen name="after-dark/[section]" options={{ contentStyle: { backgroundColor: '#07060A' } }} />
+          {/* Phase 7A: After Dark v2 */}
+          <Stack.Screen name="after-dark/vibe/[id]" options={{ contentStyle: { backgroundColor: '#07060A' } }} />
+          <Stack.Screen name="after-dark/challenge/[id]" options={{ contentStyle: { backgroundColor: '#07060A' } }} />
+          <Stack.Screen name="after-dark/card" options={{ contentStyle: { backgroundColor: '#07060A' } }} />
           <Stack.Screen name="people" />
           <Stack.Screen name="agent" />
           <Stack.Screen name="loops" />
@@ -144,6 +247,8 @@ export default function RootLayout() {
         </Stack>
         {/* Phase 6B: one global media viewer (a modal, not a route). */}
         {appReady ? <MediaViewer /> : null}
+        {/* Phase 7C: a quiet "Offline" pill (REAL only; never blocks anything). */}
+        {appReady && mode === 'real' ? <OfflineBanner /> : null}
         </AppReviewFrame>
       </ThemeProvider>
     </GestureHandlerRootView>

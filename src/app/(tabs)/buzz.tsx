@@ -135,10 +135,7 @@ export default function BuzzScreen() {
         onRefresh={real ? () => void refresh() : undefined}
         ListHeaderComponent={
           <View style={{ marginBottom: 4 }}>
-            <PageHeader title="Buzz" right={<CreateButton href="/create" />} />
-            <T v="subhead" color={colors.inkMuted} style={{ paddingHorizontal: 20, marginTop: -8, marginBottom: 14 }}>
-              Thoughts. Photos. Takes. Real people.
-            </T>
+            <PageHeader title="Buzz" subtitle="Thoughts. Photos. Takes. Real people." right={<CreateButton href="/create" />} />
             {tabs}
             <ComposeRow />
             {tab === 'forYou' && worldUpdates.length ? (

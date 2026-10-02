@@ -31,8 +31,12 @@ import type {
   User,
 } from '@/types/models';
 
-import { AFFINITY, MATCH, RELEVANCE } from './config';
+import { exposureFor } from '@/store/useExposure';
+
+import { AFFINITY, INTELLIGENCE, MATCH, RELEVANCE, SIGNALS } from './config';
 import { buildGraph, Graph, GraphState, ME_NODE, node } from './graph';
+import { combine, confidenceOf, exposurePenalties, type Opportunity } from './signals';
+import { intentFor, interestMomentum, momentumFor } from './time';
 import { freshCount } from './touch';
 
 // ─── Context (memoised per state) ───────────────────────────────────────────
@@ -43,6 +47,10 @@ export interface GraphContext {
   /** Match explanation for a person (cached). */
   match: (personId: string) => MatchExplanation;
   activeLoops: OpenLoop[];
+  /** Phase 7C: when this context was built (timing signals use it, so one context = one answer). */
+  now: number;
+  /** Phase 7C: interest momentum (recent, decayed affinity gains), computed once per context. */
+  momentum: () => Record<string, number>;
 }
 
 const STATE_KEYS: (keyof GraphState)[] = [
@@ -65,9 +73,13 @@ export function getContext(s: GraphState): GraphContext {
   if (lastState && lastCtx && lastVersion === ds().version && STATE_KEYS.every((k) => lastState![k] === s[k])) return lastCtx;
   const g = buildGraph(s);
   const cache = new Map<string, MatchExplanation>();
+  const now = Date.now();
+  let momentum: Record<string, number> | null = null;
   const ctx: GraphContext = {
     s,
     g,
+    now,
+    momentum: () => (momentum ??= interestMomentum(s.activity, now)),
     activeLoops: s.openLoops.filter(isActiveLoop),
     match: (id) => {
       let m = cache.get(id);
@@ -286,6 +298,15 @@ export function loopReasons(matches: { loop: OpenLoop; value: number }[]): Reaso
 
 const SO = RELEVANCE.social;
 
+/**
+ * Phase 7A: the private Crush signal (0 or RELEVANCE.social.privateCrush).
+ * Only your own Crush, only for your own ranking, never a reason or a label —
+ * nothing built from it may be shown. Exposed for future Opportunity Graph work.
+ */
+export function privateCrushSignal(ctx: GraphContext, personId: string): number {
+  return ctx.s.crushes[personId] && !ctx.s.blocked[personId] ? SO.privateCrush : 0;
+}
+
 export function socialPart(ctx: GraphContext, people: string[]): { part: number; known: string[]; matches: string[] } {
   const { s } = ctx;
   const known: string[] = [];
@@ -302,7 +323,8 @@ export function socialPart(ctx: GraphContext, people: string[]): { part: number;
     } else if (ctx.match(id).matchScore >= MATCH.strongAt) {
       sum += SO.strongMatch;
       matches.push(id);
-    }
+    }    // Silent: adds weight, never a name in "known"/"matches" (so never a reason).
+    sum += privateCrushSignal(ctx, id);
   }
   // Connections before follows in every sentence.
   known.sort((a, b) => Number(!!s.connections[b]) - Number(!!s.connections[a]));
@@ -840,9 +862,39 @@ export interface RankedPerson {
   person: User;
   match: MatchExplanation;
   score: number;
+  /** Phase 7C: the decomposed signals behind `score` (Graph Debug only). */
+  opportunity?: Opportunity;
 }
 
-/** Everyone except you and people you blocked, best match first. */
+/**
+ * Phase 7C: a person as an opportunity, from their match parts plus time,
+ * intent, actionability, novelty and what you've already been shown.
+ * Relevance is the match itself; the rest decides between similar matches
+ * ("who is relevant NOW"). Never shown as a number.
+ */
+export function personOpportunity(ctx: GraphContext, personId: string, match = ctx.match(personId)): Opportunity {
+  const { s } = ctx;
+  const p = match.parts;
+  const person = repo.user(personId);
+  const followsMe = ctx.g.has(node('person', personId), 'FOLLOWS', ME_NODE);
+  const already = !!(s.following[personId] || s.connections[personId]);
+  const shared = match.sharedInterests;
+  const ref: EntityRef = { kind: 'person', id: personId };
+  const intent = Math.max(p.openTo ?? 0, p.loops ?? 0, intentFor(s.activity, ctx.now, { refs: [ref], interests: shared }));
+  const exp = exposurePenalties(exposureFor(ds().me.id), `person:${personId}`, { activity: s.activity, refs: [ref], intent, now: ctx.now });
+  const signals = {
+    relevance: (match.matchScore - MATCH.base) / MATCH.span,
+    timing: Math.max(momentumFor(ctx.momentum(), shared), (p.place ?? 0) > 0 && (p.place ?? 0) < 1 ? p.place ?? 0 : 0, match.sharedMoves.length ? 0.5 : 0),
+    relationship: Math.max(p.mutuals ?? 0, s.following[personId] ? 0.6 : 0, followsMe ? 0.5 : 0),
+    intent,
+    actionability: Math.min(1, match.openers.length / 2 + (match.possibleMoves.length ? 0.25 : 0)),
+    novelty: already ? 0.2 : exp.seenBefore ? 0.5 : 1,
+    confidence: confidenceOf([p.interests ?? 0, p.boards ?? 0, p.moves ?? 0, p.loops ?? 0, p.mutuals ?? 0, p.openTo ?? 0, p.place ?? 0]),
+  };
+  return combine(signals, SIGNALS.people, { repetition: exp.repetition, saturation: exp.saturation }, !!person && !s.blocked[personId]);
+}
+
+/** Everyone except you and people you blocked, best opportunity first. */
 export function rankPeopleCtx(ctx: GraphContext, opts?: { excludeConnected?: boolean }): RankedPerson[] {
   return repo
     .people()
@@ -850,7 +902,11 @@ export function rankPeopleCtx(ctx: GraphContext, opts?: { excludeConnected?: boo
     .filter((p) => (opts?.excludeConnected ? !ctx.s.connections[p.id] : true))
     .map((person) => {
       const match = ctx.match(person.id);
-      return { person, match, score: match.matchScore + tiebreak(person.id) };
+      // Phase 7A: a private Crush nudges the order slightly; it's never shown and never a reason.
+      const crush = privateCrushSignal(ctx, person.id) ? SO.privateCrushPeople : 0;
+      if (!INTELLIGENCE.people) return { person, match, score: match.matchScore + crush + tiebreak(person.id) };
+      const opportunity = personOpportunity(ctx, person.id, match);
+      return { person, match, opportunity, score: opportunity.total + crush + tiebreak(person.id) };
     })
     .sort((a, b) => b.score - a.score);
 }

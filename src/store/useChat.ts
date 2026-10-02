@@ -21,11 +21,13 @@ import { create } from 'zustand';
 import type { ConversationRow, GroupRole, LoopPatch, LoopRow, MemberRow, MemberStatus, MessageRow, PingKind, PingMatchRow, PingRow, ReactionRow, SameBrainRow } from '@/services/backend/chat';
 import { fetchPeople } from '@/services/backend/content';
 import { toUser } from '@/services/backend/mappers';
+import { kindOf } from '@/services/backend/errors';
 import { discardMediaById, type PickedImage } from '@/services/backend/media';
 import { type ChatApi, realChatApi } from '@/services/chatApi';
 import { repo } from '@/services/repository';
 import type { User } from '@/types/models';
 import { onAccountChange } from './useSession';
+import { logEvent } from '@/services/analytics';
 
 export interface ChatMsg {
   id: string;
@@ -36,14 +38,45 @@ export interface ChatMsg {
   mediaId?: string;
   image?: string;
   aspect?: number;
-  type: 'text' | 'photo';
+  type: 'text' | 'photo' | 'voice';
   createdAt: string;
   /** The message this one replies to. */
   replyTo?: string;
+  /** Phase 7A (After Dark): a view-once photo, and when it was opened. */
+  viewOnce?: boolean;
+  viewedAt?: string;
+  /** Phase 7A: a voice note's URL and length. */
+  audio?: string;
+  durationMs?: number;
   /** Local only: optimistic states. */
   status?: 'sending' | 'failed';
+  /**
+   * Local only (Phase 7B patch): why a send failed — offline, refused by the
+   * server (consent / the Vibe isn't active / a block), or something else.
+   */
+  failKind?: SendFailKind;
+  /** Local only: the file already uploaded for this message (a retry doesn't upload it again). */
+  uploaded?: { id: string; url: string; aspect?: number };
   /** Local only: the photo picked for a message that hasn't uploaded yet. */
   localImage?: PickedImage;
+  /** Local only: a voice note recorded but not uploaded yet. */
+  localAudio?: { uri: string; durationMs: number };
+}
+
+export type SendFailKind = 'offline' | 'refused' | 'other';
+
+/** Why a send failed, in three buckets the screens can explain. */
+export function sendFailKind(e: unknown): SendFailKind {
+  if (kindOf(e) === 'network') return 'offline';
+  const msg = e instanceof Error ? e.message : String(e ?? '');
+  if (kindOf(e) === 'denied' || /aren’t taking|can’t message|row-level|isn’t active|has ended|is paused|hasn’t started/i.test(msg)) return 'refused';
+  return 'other';
+}
+
+/** Phase 7A: how to send (view-once photo, voice note). */
+export interface SendOptions {
+  viewOnce?: boolean;
+  voice?: { uri: string; durationMs: number };
 }
 
 export interface Conversation {
@@ -59,7 +92,7 @@ export interface Conversation {
   myStatus: MemberStatus;
   otherStatus: MemberStatus;
   lastBody?: string;
-  lastType?: 'text' | 'photo';
+  lastType?: 'text' | 'photo' | 'voice';
   lastSender?: string;
   lastAt?: string;
   unread: number;
@@ -104,7 +137,11 @@ interface ChatState {
   open: (conversationId: string) => Promise<void>;
   close: (conversationId: string) => void;
   loadExtras: (conversationId: string) => Promise<void>;
-  send: (conversationId: string, body: string, image?: PickedImage, replyTo?: string) => Promise<void>;
+  send: (conversationId: string, body: string, image?: PickedImage, replyTo?: string, opts?: SendOptions) => Promise<void>;
+  /** Phase 7A: open a view-once photo you were sent (once). Returns its URL for this one viewing. */
+  openViewOnce: (conversationId: string, messageId: string) => Promise<string | null>;
+  /** Phase 7B: can view-once photos be sent on this account's server? (null = couldn't tell) */
+  viewOnceAvailable: () => Promise<boolean | null>;
   retry: (conversationId: string, clientId: string) => Promise<void>;
   respond: (conversationId: string, accept: boolean) => Promise<void>;
   deleteMessage: (conversationId: string, messageId: string) => Promise<void>;
@@ -179,8 +216,23 @@ function toMsg(r: MessageRow): ChatMsg {
     type: r.message_type,
     createdAt: r.created_at,
     replyTo: r.reply_to ?? undefined,
+    viewOnce: r.view_once || undefined,
+    viewedAt: r.viewed_at ?? undefined,
+    durationMs: r.duration_ms ?? undefined,
   };
 }
+
+/**
+ * Phase 7A: conversations that belong to another surface (After Dark Vibes).
+ * Normal Messages never lists them; their owner claims their live messages so
+ * the chat list isn't reloaded for every romantic message.
+ */
+const foreignClaims = new Set<(row: MessageRow) => boolean>();
+export function claimConversations(fn: (row: MessageRow) => boolean): () => void {
+  foreignClaims.add(fn);
+  return () => foreignClaims.delete(fn);
+}
+const isForeign = (row: MessageRow) => [...foreignClaims].some((fn) => fn(row));
 
 function toConversation(r: ConversationRow): Conversation {
   const kind = r.kind ?? 'direct';
@@ -220,17 +272,19 @@ export const useChat = create<ChatState>((set, get) => {
     }
   };
 
-  /** Attach URLs to photo messages. */
+  /** Attach URLs to photo messages and voice notes (never to an unopened view-once photo). */
   const hydrateMedia = async (conversationId: string) => {
     const list = get().messages[conversationId] ?? [];
-    const need = list.filter((m) => m.mediaId && !m.image).map((m) => m.mediaId!);
+    const need = list.filter((m) => m.mediaId && !m.viewOnce && !(m.type === 'voice' ? m.audio : m.image)).map((m) => m.mediaId!);
     if (!need.length) return;
     try {
       const urls = await api.mediaUrls(need);
       set({
         messages: {
           ...get().messages,
-          [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.mediaId && urls[m.mediaId] ? { ...m, image: urls[m.mediaId].url, aspect: urls[m.mediaId].aspect } : m)),
+          [conversationId]: (get().messages[conversationId] ?? []).map((m) =>
+            m.mediaId && !m.viewOnce && urls[m.mediaId] ? (m.type === 'voice' ? { ...m, audio: urls[m.mediaId].url } : { ...m, image: urls[m.mediaId].url, aspect: urls[m.mediaId].aspect }) : m,
+          ),
         },
       });
     } catch (e) {
@@ -247,7 +301,7 @@ export const useChat = create<ChatState>((set, get) => {
     const list = get().messages[m.conversationId];
     if (!list) return; // not opened yet: the conversation list is enough
     const i = list.findIndex((x) => x.id === m.id || (m.clientId && x.clientId === m.clientId && x.senderId === m.senderId));
-    const next = i >= 0 ? list.map((x, k) => (k === i ? { ...x, ...m, status: undefined, localImage: undefined, image: m.image ?? x.image } : x)) : [...list, m];
+    const next = i >= 0 ? list.map((x, k) => (k === i ? { ...x, ...m, status: undefined, failKind: undefined, uploaded: undefined, localImage: undefined, localAudio: undefined, image: m.image ?? x.image, audio: m.audio ?? x.audio } : x)) : [...list, m];
     next.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
     set({ messages: { ...get().messages, [m.conversationId]: next } });
   };
@@ -287,6 +341,12 @@ export const useChat = create<ChatState>((set, get) => {
     trace('realtime message', { conversation: m.conversationId, mine, viewing });
     upsertMessage(m);
     if (!known) {
+      // Phase 7A: a Vibe's message belongs to After Dark (it tracks its own unread).
+      if (isForeign(row)) {
+        if (m.mediaId) void hydrateMedia(m.conversationId);
+        if (!mine && viewing) void api.markRead(m.conversationId).catch(() => {});
+        return;
+      }
       void get().loadConversations(); // a new conversation (a Message Request, or I was added to a group) — fetch it
       return;
     }
@@ -299,7 +359,11 @@ export const useChat = create<ChatState>((set, get) => {
   const onMessageUpdate = (row: MessageRow) => {
     if (row.deleted_at) {
       removeMessage(row.conversation_id, row.id);
-      reloadSoon(); // the preview may have moved back to an earlier message
+      if (!isForeign(row)) reloadSoon(); // the preview may have moved back to an earlier message
+    } else if (row.viewed_at) {
+      // Phase 7A: a view-once photo was opened (the sender sees "Opened").
+      const list = get().messages[row.conversation_id];
+      if (list) set({ messages: { ...get().messages, [row.conversation_id]: list.map((m) => (m.id === row.id ? { ...m, viewedAt: row.viewed_at ?? undefined, mediaId: undefined, image: undefined } : m)) } });
     }
   };
 
@@ -394,13 +458,41 @@ export const useChat = create<ChatState>((set, get) => {
     set({ conversations, messages, extras, activeId: get().activeId === cid ? undefined : get().activeId });
   };
 
+  const patchMessage = (conversationId: string, clientId: string | undefined, patch: Partial<ChatMsg>) => {
+    if (!clientId) return;
+    const list = get().messages[conversationId];
+    if (list) set({ messages: { ...get().messages, [conversationId]: list.map((m) => (m.clientId === clientId ? { ...m, ...patch } : m)) } });
+  };
+
   const deliver = async (conversationId: string, msg: ChatMsg) => {
     const uid = get().uid;
     if (!uid) throw new Error('You’re signed out.');
-    let media: { id: string; url: string; aspect?: number } | null = null;
-    if (msg.localImage) media = await api.uploadPhoto(uid, msg.localImage);
-    const row = await api.sendMessage(uid, conversationId, msg.clientId!, msg.body ?? null, media, msg.replyTo ?? null);
-    const sent = { ...toMsg(row), image: media?.url ?? msg.image, aspect: media?.aspect ?? msg.aspect };
+    // A retry reuses the file an earlier attempt already uploaded.
+    let media: { id: string; url: string; aspect?: number } | null = msg.uploaded ?? null;
+    if (!media && msg.localImage) media = await api.uploadPhoto(uid, msg.localImage, msg.viewOnce ? { private: true } : undefined);
+    if (!media && msg.localAudio) media = await api.uploadAudio(uid, msg.localAudio.uri, msg.localAudio.durationMs);
+    if (media && !msg.uploaded) {
+      msg.uploaded = media;
+      patchMessage(conversationId, msg.clientId, { uploaded: media });
+    }
+    const extra = msg.localAudio ? { kind: 'voice' as const, durationMs: msg.localAudio.durationMs } : msg.viewOnce ? { viewOnce: true } : undefined;
+    let row: MessageRow;
+    try {
+      row = await api.sendMessage(uid, conversationId, msg.clientId!, msg.body ?? null, media, msg.replyTo ?? null, extra);
+    } catch (e) {
+      // Refused (consent changed, the Vibe ended, a block): the uploaded file
+      // was never delivered — remove it rather than leave it behind.
+      if (media && sendFailKind(e) === 'refused') {
+        if (!api.demo) void discardMediaById(media.id).catch(() => {});
+        msg.uploaded = undefined;
+        patchMessage(conversationId, msg.clientId, { uploaded: undefined });
+      }
+      throw e;
+    }
+    const sent: ChatMsg =
+      msg.type === 'voice'
+        ? { ...toMsg(row), audio: media?.url ?? msg.audio }
+        : { ...toMsg(row), image: media?.url || msg.image, aspect: media?.aspect ?? msg.aspect };
     upsertMessage(sent);
     bumpSummary(sent, false);
     const c = get().conversations[conversationId];
@@ -522,44 +614,60 @@ export const useChat = create<ChatState>((set, get) => {
       }
     },
 
-    send: async (conversationId, body, image, replyTo) => {
+    send: async (conversationId, body, image, replyTo, opts) => {
       const uid = get().uid;
       const text = body.trim();
-      if (!uid || (!text && !image)) return;
+      const voice = opts?.voice;
+      if (!uid || (!text && !image && !voice)) return;
       const msg: ChatMsg = {
         id: newClientId(),
         clientId: undefined,
         conversationId,
         senderId: uid,
-        body: text || undefined,
-        type: image ? 'photo' : 'text',
-        image: image?.uri,
-        aspect: image && image.width && image.height ? image.width / image.height : undefined,
-        localImage: image,
+        body: voice ? undefined : text || undefined,
+        type: voice ? 'voice' : image ? 'photo' : 'text',
+        image: voice ? undefined : image?.uri,
+        aspect: !voice && image && image.width && image.height ? image.width / image.height : undefined,
+        localImage: voice ? undefined : image,
+        audio: voice?.uri,
+        durationMs: voice?.durationMs,
+        localAudio: voice,
+        viewOnce: !voice && !!image && opts?.viewOnce ? true : undefined,
         createdAt: new Date().toISOString(),
         replyTo,
         status: 'sending',
       };
       msg.clientId = msg.id;
       set({ messages: { ...get().messages, [conversationId]: [...(get().messages[conversationId] ?? []), msg] } });
+      // Phase 7C: that a message was sent and its kind — never its text, file or recipient.
+      logEvent('message_sent', { targetType: 'message', context: { kind: msg.type, view_once: !!msg.viewOnce } });
       bumpSummary(msg, false);
       try {
         await deliver(conversationId, msg);
       } catch (e) {
         trace('send failed', String(e));
-        set({ messages: { ...get().messages, [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.clientId === msg.clientId ? { ...m, status: 'failed' } : m)) } });
+        set({ messages: { ...get().messages, [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.clientId === msg.clientId ? { ...m, status: 'failed', failKind: sendFailKind(e) } : m)) } });
       }
+    },
+
+    viewOnceAvailable: () => api.viewOnceAvailable().catch(() => null),
+
+    openViewOnce: async (conversationId, messageId) => {
+      const url = await api.openViewOnce(messageId);
+      const list = get().messages[conversationId];
+      if (list) set({ messages: { ...get().messages, [conversationId]: list.map((m) => (m.id === messageId ? { ...m, viewedAt: new Date().toISOString(), mediaId: undefined } : m)) } });
+      return url;
     },
 
     retry: async (conversationId, clientId) => {
       const msg = (get().messages[conversationId] ?? []).find((m) => m.clientId === clientId);
       if (!msg || msg.status !== 'failed') return;
-      set({ messages: { ...get().messages, [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.clientId === clientId ? { ...m, status: 'sending' } : m)) } });
+      set({ messages: { ...get().messages, [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.clientId === clientId ? { ...m, status: 'sending', failKind: undefined } : m)) } });
       try {
         await deliver(conversationId, msg); // same clientId → never duplicated
       } catch (e) {
         trace('retry failed', String(e));
-        set({ messages: { ...get().messages, [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.clientId === clientId ? { ...m, status: 'failed' } : m)) } });
+        set({ messages: { ...get().messages, [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.clientId === clientId ? { ...m, status: 'failed', failKind: sendFailKind(e) } : m)) } });
       }
     },
 

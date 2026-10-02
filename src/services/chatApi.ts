@@ -6,7 +6,7 @@
  */
 import * as chat from '@/services/backend/chat';
 import { mediaUrl } from '@/lib/supabase';
-import { MAX_EDGE, type PickedImage, prepareImage, uploadImage } from '@/services/backend/media';
+import { MAX_EDGE, type PickedImage, prepareImage, uploadAudio, uploadImage, uploadPrivateImage } from '@/services/backend/media';
 
 export interface ChatApi {
   demo: boolean;
@@ -39,8 +39,15 @@ export interface ChatApi {
   deleteLoop: typeof chat.deleteLoop;
   subscribeInbox: typeof chat.subscribeInbox;
   subscribeConversation: typeof chat.subscribeConversation;
+  /** Phase 7A: open a view-once photo (recipient, once). */
+  openViewOnce: typeof chat.openViewOnce;
+  /** Phase 7B: is view-once set up (REAL: the server function is deployed)? null = couldn't tell. */
+  viewOnceAvailable: typeof chat.viewOnceAvailable;
+  /** Phase 7A: a voice note: uploaded (REAL) or kept on the phone (Demo). */
+  uploadAudio: (uid: string, uri: string, durationMs: number) => Promise<{ id: string; url: string }>;
   /** A chat photo / group photo: uploaded (REAL) or kept on the phone (Demo). */
-  uploadPhoto: (uid: string, img: PickedImage) => Promise<{ id: string; url: string; aspect?: number }>;
+  /** `private`: a view-once photo (Phase 7B: the private bucket; `url` is empty). */
+  uploadPhoto: (uid: string, img: PickedImage, opts?: { private?: boolean }) => Promise<{ id: string; url: string; aspect?: number }>;
   /** Group photo path → URL. */
   avatarUrl: (path: string | null | undefined) => string | undefined;
 }
@@ -48,9 +55,14 @@ export interface ChatApi {
 export const realChatApi: ChatApi = {
   demo: false,
   ...chat,
-  uploadPhoto: async (uid, img) => {
-    const up = await uploadImage(uid, 'chat', await prepareImage(img, MAX_EDGE.post));
+  uploadPhoto: async (uid, img, opts) => {
+    const prepared = await prepareImage(img, MAX_EDGE.post);
+    const up = opts?.private ? await uploadPrivateImage(uid, prepared) : await uploadImage(uid, 'chat', prepared);
     return { id: up.id, url: up.url, aspect: up.width && up.height ? up.width / up.height : undefined };
+  },
+  uploadAudio: async (uid, uri, durationMs) => {
+    const up = await uploadAudio(uid, uri, durationMs);
+    return { id: up.id, url: up.url };
   },
   avatarUrl: (path) => (path ? (/^https?:|^file:|^blob:|^data:/.test(path) ? path : mediaUrl(path)) : undefined),
 };

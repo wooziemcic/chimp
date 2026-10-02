@@ -28,8 +28,10 @@ import { freshCount, freshFor, touches, unseenChanges } from '@/graph/touch';
 import { repo } from '@/services/repository';
 import { type DemoCreations, isRealMode } from '@/services/dataset';
 import { sync } from '@/services/backend/content';
+import { type ConnectionAction, type ConnectionView, type Relationships, setConnection } from '@/services/backend/people';
 import { toReply } from '@/services/backend/mappers';
 import * as realData from '@/services/backend/realData';
+import { logActivity, logEvent } from '@/services/analytics';
 import type {
   ActivityEvent,
   Board,
@@ -124,7 +126,17 @@ export interface ChimpState extends Omit<GraphState, 'openTo'> {
   vote: (postId: string, optionId: string) => void;
   toggleMove: (moveId: string, key: keyof MoveState) => void;
   toggleFollow: (userId: string) => void;
+  /** Tap on a Connect button: the intent follows from the current state (request / cancel / accept / disconnect). */
   toggleConnect: (userId: string) => void;
+  /**
+   * Phase 7B: an explicit, idempotent connection intent. A second tap while one
+   * is running joins it (a double-tapped Accept is one Accept); the server's
+   * answer is applied as-is. Rejects with a readable error after undoing the
+   * optimistic change.
+   */
+  connectionAction: (userId: string, action: ConnectionAction) => Promise<ConnectionView>;
+  /** Phase 7B: replace relationship state with what the server says (reconcile). */
+  applyRelationships: (r: Relationships) => void;
   toggleBlock: (userId: string) => void;
   markStoryItemSeen: (itemId: string, storyId: string) => void;
   markSeen: (ref: EntityRef) => void;
@@ -259,8 +271,92 @@ function backend(label: string, run: (uid: string) => Promise<unknown>) {
   if (!isRealMode()) return;
   const uid = realData.real.uid();
   if (!uid) return;
-  run(uid).catch((e: unknown) => console.warn(`[chimp] ${label} didn’t sync:`, e instanceof Error ? e.message : e));
+  const p = run(uid);
+  (RELATIONSHIP_WRITES.has(label) ? relationshipWrite(p) : p).catch((e: unknown) => console.warn(`[chimp] ${label} didn’t sync:`, e instanceof Error ? e.message : e));
 }
+
+// Phase 7B: a reconcile must not undo a relationship change that is still on
+// its way to the server (it would flicker back). services/live.ts checks this.
+const RELATIONSHIP_WRITES = new Set(['Follow', 'Crush', 'Block']);
+let relWrites = 0;
+let relWriteAt = 0;
+function relationshipWrite<T>(p: Promise<T>): Promise<T> {
+  relWrites++;
+  relWriteAt = Date.now();
+  return p.finally(() => {
+    relWrites--;
+    relWriteAt = Date.now();
+  });
+}
+/**
+ * Phase 7C: Follow and Crush as explicit intents. Each tap sends "on" or
+ * "off" (idempotent on the server), one at a time per person, in tap order,
+ * so the server ends where the last tap left it. A failed write puts the
+ * switch back only if no newer tap is waiting behind it.
+ */
+const intentSlots = new Map<string, { chain: Promise<unknown>; latest: number }>();
+function sendIntent(key: string, label: string, run: () => Promise<unknown>, rollback: () => void) {
+  const slot = intentSlots.get(key) ?? { chain: Promise.resolve(), latest: 0 };
+  const n = ++slot.latest;
+  slot.chain = relationshipWrite(slot.chain.then(run)).catch((e: unknown) => {
+    if (slot.latest === n) rollback();
+    console.warn(`[chimp] ${label} didn’t sync:`, e instanceof Error ? e.message : e);
+  });
+  intentSlots.set(key, slot);
+}
+
+/** Relationship writes in flight, and when the last one started or finished (ms). */
+export const relationshipWrites = () => ({ inFlight: relWrites, at: relWriteAt });
+
+// ─── Phase 7B: connections as explicit intents ─────────────────────────────
+
+type ConnState = Pick<ChimpState, 'connections' | 'connectRequests' | 'incomingConnects'>;
+
+export function connectionViewOf(s: ConnState, userId: string): ConnectionView {
+  if (s.connections[userId]) return 'connected';
+  if (s.connectRequests?.[userId]) return 'requested_by_me';
+  if (s.incomingConnects?.[userId]) return 'requested_of_me';
+  return 'none';
+}
+
+/** What a tap means right now. */
+export function intentFor(view: ConnectionView): ConnectionAction {
+  return view === 'none' ? 'request' : view === 'requested_by_me' ? 'cancel' : view === 'requested_of_me' ? 'accept' : 'disconnect';
+}
+
+/** The state an intent leads to (the server makes the same decision, atomically). */
+export function expectedView(view: ConnectionView, action: ConnectionAction): ConnectionView {
+  switch (action) {
+    case 'request':
+      return view === 'requested_of_me' || view === 'connected' ? 'connected' : 'requested_by_me';
+    case 'accept':
+      return view === 'requested_of_me' || view === 'connected' ? 'connected' : view;
+    case 'decline':
+      return view === 'requested_of_me' ? 'none' : view;
+    case 'cancel':
+      return view === 'requested_by_me' ? 'none' : view;
+    case 'disconnect':
+      return view === 'connected' ? 'none' : view;
+  }
+}
+
+function withConnectionView(s: ConnState, userId: string, view: ConnectionView): ConnState {
+  const connections = { ...s.connections };
+  const connectRequests = { ...(s.connectRequests ?? {}) };
+  const incomingConnects = { ...(s.incomingConnects ?? {}) };
+  const had = connections[userId];
+  delete connections[userId];
+  delete connectRequests[userId];
+  delete incomingConnects[userId];
+  if (view === 'connected') connections[userId] = had ?? { userId, status: 'connected', since: new Date().toISOString() };
+  else if (view === 'requested_by_me') connectRequests[userId] = true;
+  else if (view === 'requested_of_me') incomingConnects[userId] = true;
+  return { connections, connectRequests, incomingConnects };
+}
+
+/** One request per person at a time. */
+const connInFlight = new Map<string, Promise<ConnectionView>>();
+export const connectionBusy = (userId: string) => connInFlight.has(userId);
 
 /** Phase 4 state, also used by the v4 migration. */
 function surfaceData() {
@@ -409,6 +505,8 @@ export const useChimp = create<ChimpState>()(
           }
           const event: ActivityEvent = { id: uid(), type, ref, at: Date.now(), ...(Object.keys(delta).length ? { affinity: delta } : {}) };
           set({ affinity, activity: [event, ...get().activity].slice(0, 300) });
+          // Phase 7C: the same action as a product event (REAL only; ids, never content).
+          logActivity(type, ref);
         },
 
         toggleJoin: (boardId) =>
@@ -521,55 +619,80 @@ export const useChimp = create<ChimpState>()(
             const [following, on] = toggleFlag(get().following, userId);
             set({ following });
             get().track(on ? 'follow' : 'unfollow', { kind: 'person', id: userId });
-            backend('Follow', (u) => sync.follow(u, userId, on));
+            const u = isRealMode() ? realData.real.uid() : undefined;
+            if (u) {
+              sendIntent(`follow:${userId}`, 'Follow', () => sync.follow(u, userId, on), () => {
+                const f = { ...get().following };
+                if (on) delete f[userId];
+                else f[userId] = true;
+                set({ following: f });
+              });
+            }
           }),
 
-        toggleConnect: (userId) =>
+        toggleConnect: (userId) => {
+          // A tap while a request for this person is running is ignored: a
+          // double-tapped "Accept" must not turn into "Disconnect".
+          if (repo.isMe(userId) || connInFlight.has(userId)) return;
+          void get()
+            .connectionAction(userId, intentFor(connectionViewOf(get(), userId)))
+            .catch(() => {});
+        },
+
+        connectionAction: (userId, action) => {
+          const running = connInFlight.get(userId);
+          if (running) return running;
+          const before = connectionViewOf(get(), userId);
+          if (!isRealMode()) {
+            // DEMO: connecting is instant (no one on the other side to accept).
+            const next: ConnectionView = action === 'request' || action === 'accept' ? 'connected' : 'none';
+            act(() => {
+              set(withConnectionView(get(), userId, next));
+              if (next !== before) get().track(next === 'connected' ? 'connect' : 'disconnect', { kind: 'person', id: userId });
+            });
+            return Promise.resolve(next);
+          }
+          const optimistic = expectedView(before, action);
           act(() => {
-            if (isRealMode()) {
-              // REAL (Phase 6B): connecting is mutual. Tapping Connect requests it — or
-              // accepts it when they already asked. Tapping again cancels / disconnects.
-              const s0 = get();
-              const wasConnected = !!s0.connections[userId];
-              const on = !wasConnected && !s0.connectRequests?.[userId];
-              const incoming = !!s0.incomingConnects?.[userId];
-              const connectRequests = { ...(s0.connectRequests ?? {}) };
-              const incomingConnects = { ...(s0.incomingConnects ?? {}) };
-              const connections = { ...s0.connections };
-              // Optimistic
-              if (on && incoming) {
-                connections[userId] = { userId, status: 'connected', since: new Date().toISOString() };
-                delete incomingConnects[userId];
-              } else if (on) connectRequests[userId] = true;
-              else {
-                delete connectRequests[userId];
-                delete connections[userId];
-              }
-              set({ connectRequests, incomingConnects, connections });
-              if (on && incoming) get().track('connect', { kind: 'person', id: userId });
-              backend('Connect', async (u) => {
-                const status = await sync.connectRequest(u, userId, on);
-                // Reconcile with what the server decided (e.g. they had asked meanwhile).
-                const st = get();
-                const cr = { ...(st.connectRequests ?? {}) };
-                const ic = { ...(st.incomingConnects ?? {}) };
-                const cx = { ...st.connections };
-                delete cr[userId];
-                delete ic[userId];
-                delete cx[userId];
-                if (status === 'connected') cx[userId] = { userId, status: 'connected', since: new Date().toISOString() };
-                else if (status === 'requested') cr[userId] = true;
-                set({ connectRequests: cr, incomingConnects: ic, connections: cx });
-              });
-              return;
-            }
-            const connections = { ...get().connections };
-            const on = !connections[userId];
-            if (on) connections[userId] = { userId, status: 'connected', since: new Date().toISOString() };
-            else delete connections[userId];
-            set({ connections });
-            get().track(on ? 'connect' : 'disconnect', { kind: 'person', id: userId });
-          }),
+            set(withConnectionView(get(), userId, optimistic));
+            if (optimistic === 'connected' && before !== 'connected') get().track('connect', { kind: 'person', id: userId });
+          });
+          const p = relationshipWrite(setConnection(userId, action))
+            .then((view) => {
+              // The server's decision wins (e.g. they asked meanwhile, or already accepted elsewhere).
+              set(withConnectionView(get(), userId, view));
+              return view;
+            })
+            .catch((e: unknown) => {
+              // Undo only our own optimistic change; a newer server state (a reconcile) is left alone.
+              if (connectionViewOf(get(), userId) === optimistic) set(withConnectionView(get(), userId, before));
+              console.warn('[chimp] Connection didn’t sync:', e instanceof Error ? e.message : e);
+              throw e;
+            })
+            .finally(() => connInFlight.delete(userId));
+          connInFlight.set(userId, p);
+          return p;
+        },
+
+        applyRelationships: (r) => {
+          const flags = (ids: string[]) => Object.fromEntries(ids.map((id) => [id, true as const]));
+          const old = get().connections;
+          let next: ConnState = {
+            connections: Object.fromEntries(r.connected.map((id) => [id, old[id] ?? { userId: id, status: 'connected' as const, since: '' }])),
+            connectRequests: flags(r.requestedByMe),
+            incomingConnects: flags(r.requestedOfMe),
+          };
+          // A request in flight keeps its optimistic state until the server answers it.
+          for (const id of connInFlight.keys()) next = withConnectionView(next, id, connectionViewOf(get(), id));
+          act(() =>
+            set({
+              ...next,
+              crushes: flags(r.crushes),
+              blocked: flags(r.blocked),
+              following: flags(r.following),
+            }),
+          );
+        },
 
         toggleBlock: (userId) =>
           act(() => {
@@ -577,11 +700,9 @@ export const useChimp = create<ChimpState>()(
             if (on) {
               // Blocking ends following and connection, and hides them everywhere.
               const following = { ...get().following };
-              const connections = { ...get().connections };
               delete following[userId];
-              delete connections[userId];
               const changes = get().changes.map((c) => (touches(c, { kind: 'person', id: userId }) ? { ...c, seen: true } : c));
-              set({ blocked, following, connections, changes });
+              set({ blocked, following, ...withConnectionView(get(), userId, 'none'), changes });
               get().track('block', { kind: 'person', id: userId });
             } else {
               set({ blocked });
@@ -591,6 +712,7 @@ export const useChimp = create<ChimpState>()(
               await sync.block(u, userId, on);
               if (on) {
                 await sync.follow(u, userId, false).catch(() => {});
+                // Ends a connection or a pending request in either direction (allowed across a block).
                 await sync.connectRequest(u, userId, false).catch(() => {});
               }
             });
@@ -884,8 +1006,18 @@ export const useChimp = create<ChimpState>()(
         toggleCrush: (userId) => {
           const [crushes, on] = toggleFlag(get().crushes, userId);
           set({ crushes });
+          // Never the target: analytics only count that a Crush changed (the server drops any target too).
+          logEvent(on ? 'crush_set' : 'crush_remove', { surface: 'profile' });
           // REAL: the backend decides Sparks (my_sparks() only reveals mutual ones).
-          backend('Crush', async (u) => realData.setSparks(await sync.crush(u, userId, on)));
+          const u = isRealMode() ? realData.real.uid() : undefined;
+          if (u) {
+            sendIntent(`crush:${userId}`, 'Crush', async () => realData.setSparks(await sync.crush(u, userId, on)), () => {
+              const c = { ...get().crushes };
+              if (on) delete c[userId];
+              else c[userId] = true;
+              set({ crushes: c });
+            });
+          }
         },
 
         addCreated: (kind, item) => {

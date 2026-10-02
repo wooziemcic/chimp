@@ -6,6 +6,7 @@ import { StyleSheet, View } from 'react-native';
 import { Avatar } from '@/components/ui/Avatar';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
+import { useConnection } from '@/hooks/useConnection';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
 import { colors } from '@/theme';
@@ -23,11 +24,10 @@ interface Props {
 /** Compact person row with a follow / connect control. */
 export const PersonRow = memo(function PersonRow({ user, reason, accent = colors.accent, action = 'follow', textColor = colors.ink }: Props) {
   const following = useChimp((s) => !!s.following[user.id]);
-  const connected = useChimp((s) => !!s.connections[user.id]);
   const toggleFollow = useChimp((s) => s.toggleFollow);
-  const toggleConnect = useChimp((s) => s.toggleConnect);
-  const on = action === 'follow' ? following : connected;
-  const label = action === 'follow' ? (on ? 'Following' : 'Follow') : on ? 'Connected' : 'Connect';
+  const conn = useConnection(user.id, user.displayName);
+  const on = action === 'follow' ? following : conn.view === 'connected' || conn.view === 'requested_by_me';
+  const label = action === 'follow' ? (on ? 'Following' : 'Follow') : conn.label;
 
   return (
     <Tap onPress={() => router.push(`/profile/${user.id}`)} scaleTo={0.985} style={styles.row}>
@@ -54,12 +54,13 @@ export const PersonRow = memo(function PersonRow({ user, reason, accent = colors
       </View>
       {repo.isMe(user.id) ? null : (
         <Tap
-          onPress={() => (action === 'follow' ? toggleFollow(user.id) : toggleConnect(user.id))}
+          onPress={() => (action === 'follow' ? toggleFollow(user.id) : conn.press())}
+          disabled={action === 'connect' && conn.busy}
           haptic="light"
           accessibilityLabel={`${label} ${user.displayName}`}
           style={[styles.btn, on ? styles.btnOn : { backgroundColor: accent }]}
         >
-          {on ? <Check size={14} color={colors.ink2} strokeWidth={3} style={{ marginRight: 4 }} /> : null}
+          {on && (action === 'follow' || conn.view === 'connected') ? <Check size={14} color={colors.ink2} strokeWidth={3} style={{ marginRight: 4 }} /> : null}
           <T v="footnote" weight="700" color={on ? colors.ink2 : colors.white}>
             {label}
           </T>

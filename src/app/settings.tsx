@@ -4,11 +4,14 @@ import { ReactNode } from 'react';
 import { Alert, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { NotificationSettings } from '@/components/settings/NotificationSettings';
 import { ScreenHeader } from '@/components/ui/ScreenHeader';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { ME_ID, MY_PERSONAS } from '@/data/users';
 import { demoChatApi, resetDemoChat } from '@/services/demoChat';
+import { demoAfterDarkApi } from '@/services/demoAfterDark';
+import { useAfterDark } from '@/store/useAfterDark';
 import { repo } from '@/services/repository';
 import { useChat } from '@/store/useChat';
 import { useChimp } from '@/store/useChimp';
@@ -48,7 +51,7 @@ export default function SettingsScreen() {
   const pseudonym = MY_PERSONAS.find((p) => p.mode === 'pseudonymous')!.displayName;
 
   const reset = () =>
-    Alert.alert('Reset demo data?', 'Joins, saves, votes, follows and your agent’s learning will return to the seeded state.', [
+    Alert.alert('Reset demo data?', 'Joins, saves, votes, follows, chats, After Dark and your agent’s learning will return to the seeded state.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Reset',
@@ -60,6 +63,9 @@ export default function SettingsScreen() {
             resetDemoChat();
             useChat.getState().stop();
             void useChat.getState().start(ME_ID, demoChatApi);
+            // Phase 7A: and the Demo After Dark (its Vibes live in the Demo chats).
+            useAfterDark.getState().stop();
+            void useAfterDark.getState().start(ME_ID, demoAfterDarkApi);
           }
           router.back();
         },
@@ -113,6 +119,9 @@ export default function SettingsScreen() {
             </T>
           </View>
         </View>
+
+        {/* ── Notifications (Phase 7C; REAL accounts) ── */}
+        {!demo ? <NotificationSettings /> : null}
 
         {/* ── Account (Phase 6A) ── */}
         <View style={styles.group}>

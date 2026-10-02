@@ -5,6 +5,7 @@
  * shared-ready for Phase 6B (other real people see public content now).
  */
 import { mediaUrl, supabase } from '@/lib/supabase';
+import { backendError } from './errors';
 import { WORLD_CATALOG } from '@/data/worldCatalog';
 import type { BoardTheme, BuzzItem, CategoryId, DriftItem, ID, OpenTo } from '@/types/models';
 import {
@@ -28,8 +29,11 @@ import type { UploadedMedia, UploadedVideo } from './media';
 
 const sb = () => supabase();
 
-function must<T>(res: { data: T | null; error: { message: string } | null }, what: string): T {
-  if (res.error) throw new Error(`${what}: ${res.error.message}`);
+/** PostgREST: the function isn't on this project (migration not applied yet). */
+export const missingFunction = (e: { code?: string; message?: string }) => e.code === 'PGRST202' || /could not find the function/i.test(e.message ?? '');
+
+function must<T>(res: { data: T | null; error: { message: string; code?: string } | null }, what: string): T {
+  if (res.error) throw backendError(res.error, what);
   return res.data as T;
 }
 
@@ -538,9 +542,17 @@ export const sync = {
   async comment(uid: string, targetKind: 'buzz' | 'drift' | 'post' | 'story', targetId: string, body: string): Promise<CommentRow> {
     return must(await sb().from('comments').insert({ author_id: uid, target_kind: targetKind, target_id: targetId, body: body.trim() }).select('*').single(), 'Posting reply') as CommentRow;
   },
+  /**
+   * Phase 7C: an explicit, idempotent intent (set_crush, 0009): a repeat tap
+   * changes nothing and the answer is the server's state. Falls back to the
+   * pre-0009 table write when the function isn't on the project yet.
+   */
   async crush(uid: string, toId: string, on: boolean): Promise<string[]> {
-    if (on) must(await sb().from('crushes').upsert({ from_id: uid, to_id: toId }, { onConflict: 'from_id,to_id', ignoreDuplicates: true }), 'Saving Crush');
-    else must(await sb().from('crushes').delete().match({ from_id: uid, to_id: toId }), 'Removing Crush');
+    const r = await sb().rpc('set_crush', { p_other: toId, p_on: on });
+    if (r.error && missingFunction(r.error)) {
+      if (on) must(await sb().from('crushes').upsert({ from_id: uid, to_id: toId }, { onConflict: 'from_id,to_id', ignoreDuplicates: true }), 'Saving Crush');
+      else must(await sb().from('crushes').delete().match({ from_id: uid, to_id: toId }), 'Removing Crush');
+    } else must(r, on ? 'Saving Crush' : 'Removing Crush');
     return ((must(await sb().rpc('my_sparks'), 'Checking Sparks') as string[] | null) ?? []);
   },
   /**
@@ -554,9 +566,14 @@ export const sync = {
     if (on) must(await sb().from('blocks').upsert({ blocker_id: uid, blocked_id: personId }, { onConflict: 'blocker_id,blocked_id', ignoreDuplicates: true }), 'Blocking');
     else must(await sb().from('blocks').delete().match({ blocker_id: uid, blocked_id: personId }), 'Unblocking');
   },
-  async follow(uid: string, personId: string, on: boolean) {
+  /** Phase 7C: set_follow (0009) — idempotent; returns whether you follow them now. */
+  async follow(uid: string, personId: string, on: boolean): Promise<boolean> {
+    const r = await sb().rpc('set_follow', { p_other: personId, p_on: on });
+    if (!r.error) return !!r.data;
+    if (!missingFunction(r.error)) must(r, on ? 'Following' : 'Unfollowing');
     if (on) must(await sb().from('follows').upsert({ follower_id: uid, followee_id: personId }, { onConflict: 'follower_id,followee_id', ignoreDuplicates: true }), 'Following');
     else must(await sb().from('follows').delete().match({ follower_id: uid, followee_id: personId }), 'Unfollowing');
+    return on;
   },
 };
 
@@ -580,7 +597,7 @@ export async function fetchPeople(ids: string[]): Promise<ProfileRow[]> {
 // written for people ("Posts can be edited for 1 hour…"), so they're shown as-is.
 
 function said<T>(res: { data: T | null; error: { message: string; code?: string } | null }, what: string): T {
-  if (res.error) throw new Error(res.error.code === '42501' || res.error.code === '22023' ? res.error.message : `${what}: ${res.error.message}`);
+  if (res.error) throw backendError(res.error, what);
   return res.data as T;
 }
 

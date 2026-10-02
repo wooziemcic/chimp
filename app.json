@@ -48,7 +48,20 @@
           "photosPermission": "Chimp uses your photos so you can set a profile picture."
         }
       ],
-      "expo-video"
+      "expo-video",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Chimp uses the microphone only when you record a voice note in After Dark.",
+          "recordAudioAndroid": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#1D6BFF"
+        }
+      ]
     ],
     "extra": {
       "router": {},

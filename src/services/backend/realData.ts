@@ -6,7 +6,7 @@
  */
 import { WORLD_CATALOG, catalogCover, catalogHero } from '@/data/worldCatalog';
 import { getBoardTheme } from '@/theme/boardThemes';
-import type { Board, BuzzItem, BuzzReply, DriftItem, ID, Story } from '@/types/models';
+import type { Board, BuzzItem, BuzzReply, DriftItem, ID, Story, User } from '@/types/models';
 import { type DatasetParts, makeDataset, setDataset } from '../dataset';
 import { inferInterestsFromText } from '@/utils/inferInterests';
 import { type ProfileRow, type StoryRow, toStories, toUser } from './mappers';
@@ -62,14 +62,37 @@ export const real = {
 function publish() {
   if (!st) return;
   const p = st.profile;
+  // Phase 7B: people fetched on demand (a profile opened by id, a new request) stay
+  // known across full reloads, until the reload itself brings them.
+  const loadedPeople = st.parts.people ?? [];
+  const have = new Set(loadedPeople.map((u) => u.id));
+  const extra = [...extraPeople.values()].filter((u) => !have.has(u.id));
   const me = p
     ? toUser(p, { followers: st.followerCount })
     : toUser({ id: st.uid, username: null, display_name: null, avatar_media_id: null, avatar_url: null, avatar_focus_y: 0.3, city: null, bio: null, profile_phrase: null, profile_emoji: null, open_to: [], interests: [], onboarded_at: null });
-  setDataset(makeDataset('real', { ...st.parts, me, followerCount: st.followerCount, contentReady: st.loaded }));
+  setDataset(makeDataset('real', { ...st.parts, people: extra.length ? [...loadedPeople, ...extra] : st.parts.people, me, followerCount: st.followerCount, contentReady: st.loaded }));
+}
+
+/** Phase 7B: people loaded on demand, by id (REAL). */
+const extraPeople = new Map<string, User>();
+export function addPeople(users: User[]) {
+  if (!st || !users.length) return;
+  let changed = false;
+  for (const u of users) {
+    if (u.id === st.uid) continue;
+    const before = extraPeople.get(u.id) ?? (st.parts.people ?? []).find((x) => x.id === u.id);
+    if (before && before.displayName === u.displayName && before.avatar === u.avatar && before.city === u.city && before.bio === u.bio) continue;
+    extraPeople.set(u.id, u);
+    // A newer copy of someone already loaded replaces the old one.
+    if ((st.parts.people ?? []).some((x) => x.id === u.id)) st.parts = { ...st.parts, people: (st.parts.people ?? []).map((x) => (x.id === u.id ? { ...x, ...u } : x)) };
+    changed = true;
+  }
+  if (changed) publish();
 }
 
 /** Start (or restart) the REAL world for a signed-in account. */
 export function startReal(uid: string, profile: ProfileRow | null) {
+  extraPeople.clear();
   st = { uid, profile, parts: { boards: catalogBoards() }, followerCount: 0, storyRows: [], storyMedia: {}, loaded: false };
   publish();
 }
@@ -83,6 +106,7 @@ export function markLoaded() {
 
 export function stopReal() {
   st = null;
+  extraPeople.clear();
 }
 
 export function applyLoaded(profile: ProfileRow | null, parts: Omit<DatasetParts, 'me'>, followerCount: number) {

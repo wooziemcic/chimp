@@ -1,23 +1,28 @@
-import { Redirect, router, useLocalSearchParams } from 'expo-router';
+import { Redirect, router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Check, ChevronLeft, Ellipsis, Heart, Link2, MessageCircle, UserPlus } from 'lucide-react-native';
-import { useEffect, useState } from 'react';
-import { Alert, FlatList, ScrollView, StyleSheet, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BoardCard } from '@/components/boards/BoardCard';
 import { MoveCard } from '@/components/moves/MoveCard';
 import { ProfileHero } from '@/components/profile/ProfileHero';
 import { InterestGraph, KnownFor, OpenToCard, PromptsRow, StatsRow, WhyMatchCard } from '@/components/profile/ProfileParts';
+import { SparkActions } from '@/components/afterdark/v2/SparkActions';
 import { StoryBubble } from '@/components/stories/StoryBubble';
 import { IconButton } from '@/components/ui/IconButton';
 import { Button, EmptyState, MatchRing, SectionHeader } from '@/components/ui/misc';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { crushEligibility, RELATIONSHIP_LABEL } from '@/graph/relevance';
+import { useConnection } from '@/hooks/useConnection';
 import { useGraphCtx, useMatch } from '@/hooks/useGraph';
 import { repo } from '@/services/repository';
+import { useAfterDark } from '@/store/useAfterDark';
+import { useChat } from '@/store/useChat';
 import { followerCountFor, useChimp } from '@/store/useChimp';
+import { type PersonStatus, usePeople } from '@/store/usePeople';
 import { colors, radius, shadow } from '@/theme';
 import { compact } from '@/utils/format';
 
@@ -29,26 +34,36 @@ export default function ProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const user = repo.user(id);
   const following = useChimp((s) => s.following);
-  const connected = useChimp((s) => !!s.connections[id]);
-  const requested = useChimp((s) => !!s.connectRequests?.[id]);
-  const incoming = useChimp((s) => !!s.incomingConnects?.[id]);
   const myOpenTo = useChimp((s) => s.profile.openTo);
   const toggleFollow = useChimp((s) => s.toggleFollow);
-  const toggleConnect = useChimp((s) => s.toggleConnect);
+  const conn = useConnection(id, user?.displayName);
+  const connected = conn.view === 'connected';
   const toggleBlock = useChimp((s) => s.toggleBlock);
   const toggleCrush = useChimp((s) => s.toggleCrush);
   const markSeen = useChimp((s) => s.markSeen);
   const match = useMatch(id);
   const ctx = useGraphCtx();
   const [menu, setMenu] = useState(false);
+  // Phase 7B: never decide "not found" from the local snapshot. Fetch the person
+  // (new accounts included) and refresh them when you come back to this screen.
+  const ensure = usePeople((s) => s.ensure);
+  const personStatus = usePeople((s) => s.status[id]);
 
   useEffect(() => {
     if (user) markSeen({ kind: 'person', id: user.id });
   }, [user, markSeen]);
+  useFocusEffect(
+    useCallback(() => {
+      if (!id || repo.isMe(id)) return;
+      const known = !!repo.user(id);
+      const at = usePeople.getState().fetchedAt[id];
+      if (!known || !at || Date.now() - at > 60_000) void ensure(id, { force: known });
+    }, [id, ensure]),
+  );
 
   if (repo.isMe(user?.id)) return <Redirect href="/you" />;
   if (!user || !match) {
-    return <EmptyState title="Person not found" action={<Button label="Go back" onPress={() => router.back()} />} />;
+    return <PersonPending id={id} status={personStatus} onRetry={() => void ensure(id, { force: true })} />;
   }
 
   const first = user.displayName.split(' ')[0];
@@ -115,14 +130,24 @@ export default function ProfileScreen() {
           {/* Phase 6C: Connect · Message · ••• on one row, each readable; ♡ Crush (only when eligible) gets its own, distinct row. */}
           <View style={styles.actions}>
             <Tap
-              onPress={() => toggleConnect(user.id)}
+              onPress={conn.press}
               haptic="medium"
-              accessibilityLabel={connected ? `Disconnect from ${user.displayName}` : `Connect with ${user.displayName}`}
-              style={[styles.action, connected ? styles.actionOff : { backgroundColor: colors.accent }, !connected && shadow.glow]}
+              disabled={conn.busy}
+              testID="profile-connect"
+              accessibilityLabel={
+                connected
+                  ? `Disconnect from ${user.displayName}`
+                  : conn.view === 'requested_by_me'
+                    ? `Cancel your request to ${user.displayName}`
+                    : conn.view === 'requested_of_me'
+                      ? `Accept ${user.displayName}’s request`
+                      : `Connect with ${user.displayName}`
+              }
+              style={[styles.action, connected ? styles.actionOff : { backgroundColor: colors.accent }, !connected && shadow.glow, conn.busy && { opacity: 0.7 }]}
             >
               {connected ? <Check size={17} color={colors.accent} strokeWidth={3} /> : <Link2 size={17} color={colors.white} />}
               <T v="subhead" weight="700" color={connected ? colors.accent : colors.white} style={{ marginLeft: 6, flexShrink: 1 }} numberOfLines={1} maxFontSizeMultiplier={1.15}>
-                {connected ? 'Connected' : requested ? 'Requested' : incoming ? 'Accept' : 'Connect'}
+                {conn.label}
               </T>
             </Tap>
             <Tap onPress={() => router.push(`/chat/${user.id}`)} haptic="light" style={[styles.action, styles.actionOff]} accessibilityLabel={`Message ${first}`}>
@@ -135,6 +160,18 @@ export default function ProfileScreen() {
               <Ellipsis size={18} color={colors.ink} />
             </Tap>
           </View>
+          {conn.error ? (
+            <T v="caption" color={colors.danger} weight="600" style={{ marginTop: 6 }}>
+              {conn.error}
+            </T>
+          ) : null}
+          {conn.view === 'requested_of_me' ? (
+            <Tap onPress={() => conn.run('decline')} disabled={conn.busy} style={{ marginTop: 6, alignSelf: 'flex-start', minHeight: 32, justifyContent: 'center' }} accessibilityLabel={`Decline ${user.displayName}’s request`}>
+              <T v="caption" weight="600" color={colors.inkMuted}>
+                {`${first} asked to connect · Decline`}
+              </T>
+            </Tap>
+          ) : null}
           {eligible ? (
             <Tap
               onPress={() => toggleCrush(user.id)}
@@ -190,16 +227,18 @@ export default function ProfileScreen() {
           </View>
         </ProfileHero>
 
-        {/* Crush + Crush = Spark. Never says who chose first; starters come from shared context. */}
+        {/* Crush + Crush = a mutual Crush. Never says who chose first; starters come from shared context. */}
         {match.spark ? (
           <View style={styles.spark}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Heart size={18} color="#FF3D6E" fill="#FF3D6E" />
               <T v="headline" style={{ marginLeft: 8 }}>
-                {`You and ${first} have a Spark`}
+                {`You and ${first} have a mutual Crush`}
               </T>
             </View>
-            <T v="footnote" color={colors.inkMuted} weight="500" style={{ marginTop: 2 }}>
+            {/* Phase 7A: a mutual Crush only offers the next step (normal chat, or ask for a Vibe). */}
+            <SparkActions personId={user.id} first={first} />
+            <T v="footnote" color={colors.inkMuted} weight="500" style={{ marginTop: 12 }}>
               Start from something you share. Tapping fills in the chat; you send it.
             </T>
             {match.openers.map((o) => (
@@ -293,6 +332,47 @@ export default function ProfileScreen() {
           </T>
         </Tap>
       </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+/**
+ * Phase 7B: a profile that isn't on this phone yet is LOADING, not missing.
+ * Only a profile the server confirms doesn't exist (after a few tries) says so.
+ */
+function PersonPending({ id, status, onRetry }: { id: string; status?: PersonStatus; onRetry: () => void }) {
+  const hint = (useChat.getState().people[id] ?? useAfterDark.getState().people[id])?.displayName?.split(' ')[0];
+  const who = hint ? `${hint}’s` : 'this';
+  if (status === 'missing') {
+    return <EmptyState title="This profile isn’t available" body="It may have been deleted, or the link is wrong." action={<Button label="Go back" onPress={() => router.back()} />} />;
+  }
+  if (status === 'offline') {
+    return (
+      <EmptyState
+        title={`Couldn’t load ${who} profile`}
+        body="Check your connection, then try again."
+        action={
+          <View style={{ gap: 8 }}>
+            <Button label="Retry" onPress={onRetry} />
+            <Button label="Go back" variant="secondary" onPress={() => router.back()} />
+          </View>
+        }
+      />
+    );
+  }
+  return (
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg }} testID="profile-loading">
+      <View style={styles.top}>
+        <IconButton label="Back" onPress={() => router.back()}>
+          <ChevronLeft size={24} color={colors.ink} />
+        </IconButton>
+      </View>
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: 60 }}>
+        <ActivityIndicator color={colors.accent} />
+        <T v="callout" color={colors.inkMuted} style={{ marginTop: 12 }}>
+          {status === 'retrying' ? `Still loading ${who} profile…` : `Loading ${who} profile…`}
+        </T>
+      </View>
     </SafeAreaView>
   );
 }

@@ -6,6 +6,7 @@ import { useMemo, useRef } from 'react';
 import { FlatList, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { ConnectionRequests } from '@/components/profile/ConnectionRequests';
 import { MatchCard } from '@/components/profile/MatchCard';
 import { InterestGraph, KnownFor, OpenLoopsPanel, OpenToCard, PromptsRow, StatsRow, AgentBriefingCard } from '@/components/profile/ProfileParts';
 import { ProfileHero } from '@/components/profile/ProfileHero';
@@ -181,6 +182,9 @@ export default function YouScreen() {
             </Tap>
           </View>
         </ProfileHero>
+
+        {/* Phase 7B: requests to connect, where you'll see them. */}
+        <ConnectionRequests />
 
         <View style={{ marginTop: 14 }}>
           <DatingSummary openTo={profile.openTo} sparks={sparks} onEdit={() => scroller.current?.scrollTo({ y: openToY.current - 12, animated: true })} />

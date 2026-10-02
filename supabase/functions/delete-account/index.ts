@@ -69,7 +69,19 @@ Deno.serve(async (req) => {
     if (!error) removed += chunk.length;
   }
   if (worldFiles.length) await admin.from('storage_cleanup').delete().in('path', worldFiles);
-  const prefixes = ['avatars', 'posts', 'drift', 'stories', 'chat'].map((f) => `${f}/${user.id}`).concat(deletedWorlds.map((id) => `boards/${id}`));
+  // Phase 7A/7B: + After Dark card photos (afterdark/) and private view-once photos (vibe-media once/).
+  const prefixes = ['avatars', 'posts', 'drift', 'stories', 'chat', 'afterdark'].map((f) => `${f}/${user.id}`).concat(deletedWorlds.map((id) => `boards/${id}`));
+  for (let round = 0; round < 50; round++) {
+    const prefix = `once/${user.id}`;
+    const { data: files, error } = await admin.storage.from('vibe-media').list(prefix, { limit: 1000 });
+    if (error || !files?.length) break;
+    const paths = files.filter((f) => f.name).map((f) => `${prefix}/${f.name}`);
+    if (!paths.length) break;
+    const { error: rmErr } = await admin.storage.from('vibe-media').remove(paths);
+    if (rmErr) break;
+    removed += paths.length;
+    if (files.length < 1000) break;
+  }
   for (const prefix of prefixes) {
     for (let round = 0; round < 50; round++) {
       const { data: files, error } = await admin.storage.from('media').list(prefix, { limit: 1000 });
