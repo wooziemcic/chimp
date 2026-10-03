@@ -27,6 +27,11 @@ const dateLine = () => new Date().toLocaleDateString('en-US', { weekday: 'long',
 
 export const TodayEdition = memo(function TodayEdition({ edition, theme, onExplore }: { edition: Edition; theme: BoardTheme; onExplore: () => void }) {
   const { board, lead, modules, topics } = edition;
+  // Build 5 patch 2: nothing posted or happening today — no cover and no content
+  // module. "From your people" (membership lines like "Mira is a member") and
+  // "Trending" (nearby topics and Worlds) aren't today's activity, so on their
+  // own they don't count and aren't shown.
+  const empty = !lead && modules.every((m) => m.id === 'people' || m.id === 'trending');
   return (
     <Animated.View entering={FadeIn.duration(250)}>
       {/* Masthead */}
@@ -61,11 +66,30 @@ export const TodayEdition = memo(function TodayEdition({ edition, theme, onExplo
 
       {lead ? <Cover lead={lead} theme={theme} /> : null}
 
-      {modules.map((m) => (
-        <Module key={m.id} m={m} theme={theme} boardTitle={board.title} />
-      ))}
+      {empty
+        ? null
+        : modules.map((m) => (
+            <Module key={m.id} m={m} theme={theme} boardTitle={board.title} />
+          ))}
 
-      {/* Finite: the edition ends, Explore is the rabbit hole. */}
+      {empty ? (
+        // Truly empty today: say so plainly (never old content dressed up as today).
+        <View style={styles.emptyToday} testID="today-empty">
+          <T v="headline" color={theme.text}>
+            Nothing here today yet
+          </T>
+          <T v="footnote" color={theme.mutedText} style={{ marginTop: 2 }}>
+            New posts and activity will show up here.
+          </T>
+          <Tap onPress={onExplore} style={{ marginTop: 10, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', minHeight: 32 }} accessibilityLabel="Open Explore">
+            <T v="subhead" weight="700" color={theme.primary}>
+              {`Explore ${board.title}`}
+            </T>
+            <ArrowRight size={15} color={theme.primary} style={{ marginLeft: 4 }} />
+          </Tap>
+        </View>
+      ) : (
+      /* Finite: the edition ends, Explore is the rabbit hole. */
       <View style={[styles.end, { borderColor: theme.line }]}>
         <T v="headline" color={theme.text} align="center">
           You’re caught up on today
@@ -80,6 +104,7 @@ export const TodayEdition = memo(function TodayEdition({ edition, theme, onExplo
           <ArrowRight size={16} color={theme.onPrimary} style={{ marginLeft: 6 }} />
         </Tap>
       </View>
+      )}
     </Animated.View>
   );
 });
@@ -422,6 +447,7 @@ function ExploreItem({ e, w, theme }: { e: ExploreEntry; w: number; theme: Board
 }
 
 const styles = StyleSheet.create({
+  emptyToday: { marginHorizontal: 16, marginTop: 8, marginBottom: 8, paddingVertical: 4 },
   masthead: { paddingHorizontal: 20, paddingTop: 4, paddingBottom: 14 },
   topicRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 },
   topic: { height: 28, paddingHorizontal: 11, borderRadius: 14, borderWidth: 1, justifyContent: 'center' },

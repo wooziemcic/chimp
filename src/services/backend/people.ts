@@ -105,6 +105,27 @@ export interface UserEventRow {
   actor_id: string | null;
   ref_id: string | null;
   created_at: string;
+  seen_at?: string | null;
+}
+
+/** Build 5 patch 2: an in-app social notification (a row of your own user_events). */
+export type SocialEventRow = UserEventRow & { seen_at: string | null };
+
+/** Your recent social events, newest first (RLS: only your own rows are readable). */
+export async function fetchSocialEvents(kinds: string[], limit = 50): Promise<SocialEventRow[]> {
+  const { data, error } = await sb()
+    .from('user_events')
+    .select('id,user_id,kind,actor_id,ref_id,created_at,seen_at')
+    .in('kind', kinds)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error('events unavailable');
+  return (data ?? []) as SocialEventRow[];
+}
+
+/** Mark your events seen (0008 mark_events_seen; your own rows only). */
+export async function markEventsSeen(): Promise<void> {
+  await sb().rpc('mark_events_seen');
 }
 
 /**

@@ -4,6 +4,7 @@ import { ReactNode } from 'react';
 import { View } from 'react-native';
 
 import { useUnseenChanges } from '@/hooks/useGraph';
+import { selectUnseenSocial, useSocialInbox } from '@/store/useSocialInbox';
 import { BOARD_THEMES, colors, layout } from '@/theme';
 import { IconButton } from './IconButton';
 import { T } from './Text';
@@ -33,7 +34,8 @@ interface Props {
  * normal Chimp and After Dark have the same gutter, top spacing and gaps).
  */
 export function PageHeader({ title, eyebrow = 'Chimp', subtitle, dark, right, badge, showActions = true, compact, subtitleColor }: Props) {
-  const unseen = useUnseenChanges().length;
+  // World Delta + (Build 5 patch 2) new follows / connection events.
+  const unseen = useUnseenChanges().length + useSocialInbox(selectUnseenSocial);
   const ink = dark ? colors.white : colors.ink;
   return (
     <View style={{ paddingHorizontal: layout.gutter, paddingTop: layout.headerTop, paddingBottom: subtitle ? 0 : compact ? layout.headerToSegmented - 2 : layout.headerToSegmented }}>

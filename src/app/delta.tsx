@@ -1,5 +1,6 @@
 import { router } from 'expo-router';
 import { CalendarClock, Calendar, CheckCheck, Heart, LayoutGrid, Link2, PlayCircle, Sparkles, UserPlus } from 'lucide-react-native';
+import { useEffect } from 'react';
 import { FlatList, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -11,6 +12,9 @@ import { T } from '@/components/ui/Text';
 import { useUnseenChanges } from '@/hooks/useGraph';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
+import { socialLine, useSocialInbox } from '@/store/useSocialInbox';
+import type { SocialEventRow } from '@/services/backend/people';
+import { Avatar } from '@/components/ui/Avatar';
 import { colors, radius } from '@/theme';
 import type { ChangeEvent, ChangeType } from '@/types/models';
 import { hrefFor } from '@/utils/links';
@@ -36,6 +40,18 @@ export default function DeltaSheet() {
   const unseen = useUnseenChanges();
   const markChangeSeen = useChimp((s) => s.markChangeSeen);
   const markAll = useChimp((s) => s.markAllChangesSeen);
+  // Build 5 patch 2: follows and connections for you (your own user_events).
+  const social = useSocialInbox((s) => s.items);
+  const markSocialSeen = useSocialInbox((s) => s.markSeen);
+  // Seeing the list counts as seeing them (the Bell dot clears).
+  useEffect(() => {
+    const t = setTimeout(markSocialSeen, 800);
+    return () => clearTimeout(t);
+  }, [markSocialSeen]);
+  const openPerson = (id: string) => {
+    router.back();
+    setTimeout(() => router.push(`/profile/${id}`), 250);
+  };
 
   const open = (d: ChangeEvent) => {
     markChangeSeen(d.id);
@@ -47,7 +63,7 @@ export default function DeltaSheet() {
     <View style={{ flex: 1, backgroundColor: colors.surface }}>
       <SheetHeader
         title="Since you left"
-        subtitle={unseen.length ? `${unseen.length} things changed in your world` : 'Nothing new yet'}
+        subtitle={unseen.length ? `${unseen.length} things changed in your world` : social.length ? 'Your latest follows and connections' : 'Nothing new yet'}
         right={
           unseen.length ? (
             <Tap onPress={markAll} style={styles.markAll} accessibilityLabel="Mark all as seen">
@@ -64,12 +80,15 @@ export default function DeltaSheet() {
         keyExtractor={(d) => d.id}
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: insets.bottom + 24, gap: 10 }}
         renderItem={({ item }) => <DeltaRow delta={item} onPress={() => open(item)} />}
+        ListHeaderComponent={social.length ? <SocialList items={social} onOpen={openPerson} /> : null}
         ListEmptyComponent={
-          <EmptyState
-            icon={<CheckCheck size={24} color={colors.accent} />}
-            title="You’re caught up"
-            body="We’ll collect what changes in your boards, people and Moves while you’re away."
-          />
+          social.length ? null : (
+            <EmptyState
+              icon={<CheckCheck size={24} color={colors.accent} />}
+              title="You’re caught up"
+              body="We’ll collect what changes in your boards, people and Moves while you’re away."
+            />
+          )
         }
         ListFooterComponent={
           unseen.length ? (
@@ -79,6 +98,39 @@ export default function DeltaSheet() {
           ) : null
         }
       />
+    </View>
+  );
+}
+
+/** Follows and connections (newest first). Tap → their profile. */
+function SocialList({ items, onOpen }: { items: SocialEventRow[]; onOpen: (personId: string) => void }) {
+  const shown = items.filter((i) => !!i.actor_id).slice(0, 20);
+  if (!shown.length) return null;
+  return (
+    <View style={{ marginBottom: 6 }} testID="social-notifications">
+      <T v="label" color={colors.inkFaint} style={{ marginBottom: 6, marginTop: 2 }}>
+        PEOPLE
+      </T>
+      {shown.map((i) => {
+        const u = repo.user(i.actor_id!);
+        const name = u?.displayName.split(' ')[0] ?? 'Someone';
+        return (
+          <Tap key={i.id} onPress={() => onOpen(i.actor_id!)} scaleTo={0.98} style={[styles.row, { marginBottom: 8 }]} accessibilityLabel={socialLine(i.kind, name)} testID="social-row">
+            <View>
+              <Avatar uri={u?.avatar} name={u?.displayName ?? name} size={44} />
+              {!i.seen_at ? <View style={styles.newDot} /> : null}
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <T v="subhead" weight="700" numberOfLines={2}>
+                {socialLine(i.kind, name)}
+              </T>
+              <T v="caption" color={colors.inkFaint} weight="500" style={{ marginTop: 2 }}>
+                {timeAgo(Date.parse(i.created_at))}
+              </T>
+            </View>
+          </Tap>
+        );
+      })}
     </View>
   );
 }
@@ -117,6 +169,7 @@ function DeltaRow({ delta, onPress }: { delta: ChangeEvent; onPress: () => void 
 }
 
 const styles = StyleSheet.create({
+  newDot: { position: 'absolute', right: -1, top: -1, width: 12, height: 12, borderRadius: 6, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.white },
   markAll: { flexDirection: 'row', alignItems: 'center', minHeight: 40, paddingHorizontal: 6 },
   row: {
     flexDirection: 'row',

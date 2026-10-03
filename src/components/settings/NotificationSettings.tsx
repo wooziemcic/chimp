@@ -15,7 +15,7 @@ import { colors, radius } from '@/theme';
 
 const ROWS: { key: keyof NotificationPrefs; label: string; body: string; icon: ReactNode }[] = [
   { key: 'messages', label: 'Messages', body: 'Who wrote to you. Never what they wrote.', icon: <MessageCircle size={18} color={colors.accent} /> },
-  { key: 'connections', label: 'Connections', body: 'Requests and accepted connections.', icon: <Users size={18} color={colors.accent} /> },
+  { key: 'connections', label: 'Connections', body: 'New followers, requests and accepted connections.', icon: <Users size={18} color={colors.accent} /> },
   { key: 'after_dark', label: 'After Dark', body: 'Always discreet: “New After Dark message”, never a name.', icon: <Heart size={18} color={colors.accent} /> },
 ];
 

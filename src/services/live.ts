@@ -31,6 +31,7 @@ import { fetchRelationships, subscribeUserEvents, type UserEventRow } from '@/se
 import * as realData from '@/services/backend/realData';
 import { repo } from '@/services/repository';
 import { useAfterDark } from '@/store/useAfterDark';
+import { isSocialKind, useSocialInbox } from '@/store/useSocialInbox';
 import { relationshipWrites, useChimp } from '@/store/useChimp';
 import { useSession } from '@/store/useSession';
 
@@ -78,7 +79,7 @@ let running: Promise<void> | null = null;
 let again = false;
 let lastAppState: AppStateStatus = AppState.currentState;
 
-const RELATIONSHIP_EVENTS = new Set(['connection_request', 'connection_accepted', 'connection_updated', 'mutual_crush', 'relationship_updated']);
+const RELATIONSHIP_EVENTS = new Set(['follow', 'connection_request', 'connection_accepted', 'connection_updated', 'mutual_crush', 'relationship_updated']);
 const AFTER_DARK_EVENTS = new Set(['vibe_request', 'vibe_accepted', 'vibe_updated', 'challenge_your_turn', 'challenge_completed', 'plan_waiting', 'plan_updated']);
 
 /** Re-read relationships now (one at a time; a call during a run queues one more). */
@@ -180,6 +181,11 @@ function subscribe(me: string) {
       if (uid !== me || gen !== generation) return;
       diag('event', { kind: row.kind });
       routeEvent(row);
+      // Build 5 patch 2: follow / connection events also land in the in-app list.
+      if (isSocialKind(row.kind)) {
+        useSocialInbox.getState().add({ ...row, seen_at: row.seen_at ?? null });
+        void ensurePeople([row.actor_id]);
+      }
     },
     (status) => {
       if (uid !== me || gen !== generation) return;
@@ -223,6 +229,8 @@ function retryLater(me: string, wait: number) {
 export async function foreground(reason: string): Promise<void> {
   const me = uid;
   if (!me) return;
+  // Anything missed while Realtime was asleep (merged by id: never twice).
+  void loadInbox(me);
   if (Date.now() - useLive.getState().syncedAt > LIVE.relationshipsStaleMs || reason !== 'foreground') await reconcileRelationships(reason);
   if (uid !== me) return;
   useAfterDark.getState().refreshIfActive(reason === 'foreground' ? LIVE.afterDarkStaleMs : 0);
@@ -230,6 +238,22 @@ export async function foreground(reason: string): Promise<void> {
     worldAt = Date.now();
     void useSession.getState().refresh();
   }
+}
+
+/** Build 5 patch 2: load the in-app social list and the people it names. */
+async function loadInbox(me: string): Promise<void> {
+  await useSocialInbox.getState().load(me);
+  if (uid !== me) return;
+  await ensurePeople(useSocialInbox.getState().items.map((i) => i.actor_id));
+}
+
+/** Profiles we haven't loaded yet (e.g. a brand-new account that just followed you). */
+async function ensurePeople(ids: (string | null)[]): Promise<void> {
+  const me = uid;
+  const unknown = [...new Set(ids.filter((id): id is string => !!id && !repo.user(id)))];
+  if (!me || !unknown.length) return;
+  const rows = await fetchPeople(unknown).catch(() => []);
+  if (uid === me && rows.length) realData.addPeople(rows.map(toUser));
 }
 
 /** REAL accounts only. Idempotent; torn down on every account change. */
@@ -268,4 +292,5 @@ export function stopLive(): void {
   stopFallback();
   again = false;
   useLive.setState({ status: 'off', syncedAt: 0, vibeHint: false });
+  useSocialInbox.getState().reset();
 }
