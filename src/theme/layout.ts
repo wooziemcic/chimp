@@ -63,3 +63,30 @@ export function navBottomInset(safeBottom: number): number {
 export function navScrollSpace(safeBottom: number): number {
   return layout.navHeight + navBottomInset(safeBottom) + layout.navBreathing;
 }
+
+/**
+ * Phase 8: room a chat composer leaves below itself so it sits just above the
+ * bar (the bar's own height + its bottom inset + a small gap). 0 while the
+ * keyboard is up, because the bar steps aside then (see useComposerNavSpace).
+ */
+export function navComposerSpace(safeBottom: number): number {
+  return layout.navHeight + navBottomInset(safeBottom) + 8;
+}
+
+/**
+ * Phase 8: the ONE list of nested routes that keep the shared bottom bar
+ * (consolidated from the Build 5 patch). Everything else above the tabs —
+ * story viewer, Drift, media viewers, camera / picker, modal sheets and flows,
+ * After Dark Vibe and challenge screens — is full-screen and has no bar.
+ */
+export const NESTED_NAV_ROUTES = ['board', 'chat', 'group'] as const;
+
+/**
+ * Routes above the tabs that keep the shared bottom bar (a Board, a normal 1:1
+ * or group chat). Exactly one segment of id after the route name; nothing
+ * nested deeper, no query tricks. (Pure; useLayout re-exports it.)
+ */
+const NESTED_NAV = new RegExp(`^/(${NESTED_NAV_ROUTES.join('|')})/[^/?#]+/?$`);
+export function keepsBottomNav(pathname: string): boolean {
+  return NESTED_NAV.test(pathname);
+}

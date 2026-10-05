@@ -12,6 +12,9 @@ const TABS: { id: BoardTab; label: string; Icon: LucideIcon }[] = [
   { id: 'people', label: 'People', Icon: Users },
 ];
 
+/** Phase 8: the pin rule lives with the safe-area contract (theme/safeArea, unit-tested). */
+export { PIN_GAP, pinAt } from '@/theme/safeArea';
+
 export function BoardTabs({ active, onChange, theme }: { active: BoardTab; onChange: (t: BoardTab) => void; theme: BoardTheme }) {
   return (
     <View style={[styles.row, { backgroundColor: theme.surface, borderColor: theme.line }]} accessibilityRole="tablist">

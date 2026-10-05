@@ -1,3 +1,640 @@
+# Chimp build notes — v0.8 — Device Reliability, Responsive iOS System, Messaging v2, Posting Reliability, Content Ordering
+
+5 Oct 2026 · branch `phase-7` (on top of `ea2961a`).
+
+I made no commits or pushes, did not merge `master`, and started no EAS build or TestFlight submission. I didn't modify migrations 0001–0010; the only new one is `0011_phase8_device_messaging.sql`. Opportunity Graph v2 was not touched.
+
+> **Status: implemented and tested locally. Not yet run on an iPhone or against your Supabase project.**
+> - **How it was tested:** a local Postgres 16 with a Supabase stub; Node tests against the real app modules; and a web build in Chromium with each iPhone family's safe-area insets **simulated**.
+> - **iPhone results:** none yet. Nothing in this document is an iPhone result. The real-device checklist at the end is what closes Phase 8.
+> - **Device labels:** they come from Apple's published point sizes and insets per family. Treat them as approximate.
+
+## What you must do once
+
+1. **Supabase → SQL Editor:** run `supabase/migrations/0011_phase8_device_messaging.sql`.
+   - It checks that 0010 is there.
+   - It runs as one transaction and is safe to run twice.
+   - RLS stays on.
+2. **Install the new packages:** run `npm install` in the project folder. `package.json` and `package-lock.json` changed.
+   - New: `expo-camera` (record video in Chimp), `expo-media-library` (save captures to Photos).
+   - `expo-file-system` is now listed explicitly; it was already part of Expo.
+3. **A new EAS build is required.** I didn't start one.
+   - Posting reliability adds two **native** modules (`expo-camera` and `expo-media-library`) and new iOS permission texts (camera, microphone, Photos add). An OTA update can't deliver them.
+   - Everything else in Phase 8 is JavaScript.
+4. Nothing else changes: no new secrets, Edge Functions, webhooks or cron jobs. Posting reliability needs **no** database migration.
+
+**If 0011 is not run:** the new app still works.
+- Reading falls back to `mark_conversation_read`.
+- Receipts show only "Sent", and the app never guesses "Delivered" or "Seen".
+- This fallback is tested.
+
+**If 0011 is run and people are still on Build 5:**
+- Build 5 keeps working (`mark_conversation_read` is unchanged).
+- Build 5 users never acknowledge delivery. People messaging them see "Sent" until they open the chat, then "Seen".
+
+**Rollback.** Only do this if you must; it removes receipts.
+
+```sql
+begin;
+drop function if exists public.chat_receipts(uuid);
+drop function if exists public.mark_delivered(uuid);
+drop function if exists public.mark_read_upto(uuid, uuid);
+drop policy if exists "members read" on public.conversation_members;
+create policy "members read" on public.conversation_members for select to authenticated using (public.is_conversation_member(conversation_id));
+alter table public.conversation_members drop column if exists last_delivered_at;
+commit;
+```
+
+- The new app copes with the rollback: missing functions mean "Sent only".
+- **Risk:** low. The migration adds one nullable column, three functions and one stricter replacement policy. Nothing is renamed or dropped.
+
+---
+
+## 1 · Post-Phase-7 audit (Part 1): what was patched, what was consolidated
+
+| Area | Before | Now |
+|---|---|---|
+| Safe-area sources | Each screen called `useSafeAreaInsets()` / `SafeAreaView`. Full-screen viewers inside a React Native `Modal` got the App Review frame's insets (top 0) or a native `SafeAreaView` that can report 0 in a fresh iOS Modal | **One contract.** In-frame screens keep `useSafeAreaInsets()`. Anything that covers the whole phone (Modal viewers, sheets in a Modal, fullScreenModal routes) uses `useDeviceInsets()`. Those are the phone's real insets, captured at the root outside the App Review frame and never lower than the launch insets |
+| Hard-coded chrome offsets | After Dark view-once viewer `top: 54`; Story/Drift `insets.top + 6`; Drift mute `insets.top + 56` | `FullscreenTopBar` / `fullscreenTop(insets)` = inset + 8, with 44-pt controls. Drift mute = `fullscreenTop + MIN_TAP + 4`. No device names, no guessed numbers |
+| Board tabs | `stickyHeaderIndices` pinned the tabs at y = 0, under the status bar (the hero is edge to edge) | The in-flow tabs plus a pinned copy placed at `safeTop + 6` once the scroll reaches `pinAt(tabsY, safeTop)` |
+| Nested routes that keep the bottom bar | A regex in `useLayout` | `NESTED_NAV_ROUTES = ['board','chat','group']`, the one list (theme/layout), and `keepsBottomNav()` is pure and tested |
+| Pure layout rules | Inside components | `src/theme/safeArea.ts` (MIN_TAP, FULLSCREEN_GAP, PIN_GAP, `resolveDeviceInsets`, `fullscreenTop`, `pinAt`) and `src/theme/layout.ts` (nav maths, nested routes). React-free and unit-tested |
+
+**Routes that bypass the shell, on purpose:**
+- Story viewer, Drift viewer, view-once photo and the media viewer: true full screen, no tab bar.
+- Compose sheets: iOS page-sheet; `CreateParts` keeps its iOS `paddingTop: 14`, which is correct for a sheet that already starts below the status bar.
+
+**Decorative fixed numbers left as they are:** `DriftTile` (`top: 40`) and `ChatStrips` (`burstWrap`). They sit inside cards, not against device chrome.
+
+## 2 · Responsive iOS system (Parts 2–7)
+
+**The root causes of the two reported bugs:**
+- **Close X too high on iPhone 16/17 base.**
+  - The media viewer used a native `SafeAreaView` inside a React Native `Modal`, which can report top = 0 for the first frames on iOS.
+  - The After Dark viewer used a fixed `top: 54`, but Dynamic Island phones have a top inset of about 59–62 pt.
+  - Inside the App Review Demo, the nested safe-area provider deliberately reports top 0.
+  - **Fix:** every full-screen surface now uses `useDeviceInsets()` + `FullscreenTopBar` (`src/components/system/SafeArea.tsx`).
+- **Board Today / Explore / People under the status bar.**
+  - `stickyHeaderIndices` pins at screen y = 0.
+  - **Fix:** the tabs pin below the safe area, on the Board's background, with a hairline. The status-bar style follows the pinned state.
+
+**What changed:**
+- **Full-screen surfaces:**
+  - Image and video viewer (`MediaViewer`): close is 44 × 44 with `hitSlop` 8. The caption clears the home indicator. Video fits between the top bar and the bottom inset, so it can't push controls off screen.
+  - Story viewer, Drift viewer, After Dark view-once viewer and After Dark photos: the last two go through `MediaViewer` / `FullscreenTopBar`.
+- **Sheets in a Modal** now use device insets for the home indicator:
+  - message menu, Open Loops, Mutual Ping, the new Seen-by sheet;
+  - World / owner menus, After Dark sheets.
+- **App shell:**
+  - The bottom bar has one source (`TabBar`, plus `NestedTabBar` on Board / chat / group routes).
+  - It steps aside while the keyboard is up, and the chat composer then sits on the keyboard (`useComposerNavSpace`).
+  - It is hidden only on true full-screen routes.
+
+## 3 · Messaging v2: Sent / Delivered / Seen (Parts 8–11)
+
+| State | Meaning (honest) | How |
+|---|---|---|
+| **Sent** | The server has the message | It has a server id and no local "sending" status |
+| **Delivered** | The recipient's **app** synced it and told the server. A push being sent does **not** count | `mark_delivered()` after an inbox sync, or when a message arrives live and that chat isn't on screen. One call covers all chats, and only when something newer from someone else arrived |
+| **Seen** | The recipient had that chat **open with the app in the foreground** at or after the message | `mark_read_upto(cid, newest message id on screen)`, debounced 300 ms. It is re-checked when it fires, and sent immediately if you leave the chat |
+
+**Read-cursor architecture (Part 9):**
+- **One cursor pair per member:** `last_read_at` (existing) and `last_delivered_at` (new).
+- **Server time only.**
+  - The client sends a message id, never a time. The cursor becomes that message's server `created_at`.
+  - Message `created_at` is forced to `now()` for app inserts (0006 guard).
+- **Monotonic and idempotent:** `greatest(old, new)`. A repeat call writes nothing, so it causes no Realtime noise.
+  - Old history isn't wrongly marked: you only ever mark up to a message you actually loaded.
+  - A late joiner never counts as having seen messages from before they joined.
+- **Realtime:** the sender's open chat listens for member-row changes.
+  - A cursor-only change refreshes just the receipts.
+  - Only a real membership change (joined, left, accepted, role) reloads the members and the chat list.
+- **Reconcile:** on foreground, the open chat is re-opened (messages, Seen, receipts). Each Realtime reconnect (`SUBSCRIBED`) reloads the list and the open chat.
+
+**UI:**
+- **One status line per chat,** under my newest message, and only while it's the newest message in the chat. Examples: `9:41 AM · Delivered`, `9:41 AM · Seen`.
+- **Groups (Part 10):**
+  - "Seen by N" or "Seen by everyone". Tap it to see who.
+  - The audience is active members who were already in the group when it was sent, excluding me.
+  - Names are never listed under messages.
+- **Delivered in groups** shows only when everyone in that audience has it.
+
+**After Dark (Part 11): Option D, no receipts at all, enforced by the server.**
+- `chat_receipts` returns nothing for a Vibe.
+- The "members read" policy hides the partner's member row inside a Vibe, so their `last_read_at` can't be queried and doesn't arrive over Realtime.
+- `mark_delivered` skips Vibes.
+- Reading a Vibe still moves your own cursor, so your unread count stays right.
+- Why: mutual-consent, romantic context; "seen and no reply" pressure is exactly what After Dark should avoid. View-once photos keep their existing "Opened" state, which is part of the view-once feature, not a read receipt.
+
+**Privacy rules (server-side, tested):**
+- No receipts across a block, in either direction.
+- No receipts from someone who hasn't accepted your request.
+- None for someone who declined or left.
+- Delivery cursors only move for **active** members who share **no block** with anyone in that conversation. A request recipient's or a blocker's app syncing never signals "online" to anyone.
+- In a 1:1, the other person's member row is hidden from the table while their request is pending, or while either of you has blocked the other.
+
+**Known residual (pre-existing since 0002, documented):**
+- In a **group**, members can query each other's raw `last_read_at` through the table API, including across a block. The app never shows it.
+- Removing it needs a client that no longer reads cursors from the table (Build 6+), followed by a column-privilege migration. Build 5 still selects `last_read_at`.
+
+**Fixed along the way (found by the new tests):**
+- **Realtime topics:** supabase-js returns the *existing* channel for a topic it already has, including one that is being removed. Closing and reopening a chat quickly, or a sign-in restart, could therefore attach listeners to a dying channel, and live updates for that chat stopped.
+  - Every subscription now gets a unique topic suffix (`realtimeTopic.ts`).
+- **A 1:1 chat opened while chat was still starting** (cold start, sign-in settling) lost its subscription when chat finished starting.
+  - `RealChat` now opens only once chat is bound to the account, and re-opens if chat restarts. Group and Vibe screens already did this.
+- **Unread counts:** a chat left open with the app in the background was zeroed. It now counts what arrives until you are actually looking at it.
+
+## 4 · Unread counts and notifications (Parts 12–15)
+
+**Unread (Part 12):**
+- **Chat unread is the server's count** (`my_conversations`: messages from others after `last_read_at`).
+  - A live message adds 1 unless you're looking at that chat in the foreground.
+  - Message Requests are counted separately.
+- **On sign-out or account switch, everything is cleared:**
+  - chat store `stop()` clears receipts, cursors, timers and per-chat state;
+  - the social inbox resets in `stopLive`;
+  - After Dark `stop()`.
+- **App icon badge:** none (`shouldSetBadge: false`). There is no app-icon count to go stale.
+
+**Notifications v2 (Part 13):** the Phase 7C system is unchanged (no new system).
+- Re-validated: push7 Node suite 30/30, 0009/0010 DB suites, and Build 5's follow / connection pushes.
+
+**Notification read model (Part 14).** Decision: keep the simple model.
+- Opening the bell (What changed) marks your social notifications seen after 0.8 s, and the bell dot clears.
+- Per-item read state was not added: the list is short, and the dot answers "anything new?".
+
+**Cold start and deep links (Part 15):** one pure rule, `pushGate()`, unit-tested.
+
+| Situation | Result |
+|---|---|
+| Foreground or background tap, right account, chat ready | Opens the route |
+| Killed, session restoring / switching / onboarding / signed out | Waits |
+| Chat not yet bound to the account | Waits up to 6 s, then opens |
+| Wrong account | Dropped |
+| Demo or App Review Demo open | Dropped |
+| Tap waiting more than 10 min (e.g. you signed in much later) | Dropped |
+
+- **Routes come only from `routeForPush`:** fixed paths plus UUID-checked ids. A payload can never supply a path.
+- **Fixed:**
+  - The cold-start tap is now consumed (`clearLastNotificationResponseAsync`), so a *later* cold launch can't reopen that old chat.
+  - The tap time is the time it was tapped, because `notification.date` is in seconds on iOS and in milliseconds on Android. The independent review caught this.
+
+**Offline and reconnect (Part 16):**
+- The existing offline banner is unchanged.
+- Sends fail as "Not sent · Tap to retry" (idempotent `client_id`).
+- On reconnect, the list and the open chat reconcile, and Seen and Delivered catch up.
+
+## 5 · Performance (Part 22)
+
+- **No read writes per render.**
+  - Seen is debounced per chat, and the server no-ops repeats.
+  - Delivered is sent only when something newer from someone else arrived.
+  - Measured on the web build: opening and leaving a chat 4× with nothing new gave **0** Delivered writes.
+- **Cursor events from other people no longer reload the chat list.** Measured: the other person reading 4× gave **0** extra list loads.
+- **No duplicate subscriptions:** each one has a unique topic, and they are all torn down on sign-out.
+
+## 6 · Migration 0011 (Part 27)
+
+`supabase/migrations/0011_phase8_device_messaging.sql`:
+- `conversation_members.last_delivered_at` (nullable). Backfilled from `last_read_at`, since what was read was delivered.
+- `mark_read_upto(p_cid, p_message_id default null) → timestamptz`.
+- `mark_delivered(p_cid default null) → integer`.
+- `chat_receipts(p_cid) → (user_id, status, joined_at, read_at, delivered_at)`. It is already filtered for privacy, and delivered includes "seen ⇒ delivered".
+- The "members read" policy is replaced with a stricter version (Vibe partner rows; 1:1 pending-request and blocked rows).
+- All functions are `security definer` with `set search_path = public`, revoked from `public`/`anon` and granted to `authenticated`.
+- Unchanged: `mark_conversation_read`, `my_conversations` and everything else Build 5 uses.
+
+## 7 · Independent security review (Part 26)
+
+A separate agent reviewed the diff read-only and probed a scratch database.
+- **No critical or high findings.**
+
+| Finding | Severity | Status |
+|---|---|---|
+| A request recipient's sync / read showed up through the raw table and Realtime (an "online" signal to a stranger) | Medium | **Fixed.** Delivery acks are active-only; the pending recipient's 1:1 row is hidden from the requester. Tests Q1b–Q2b |
+| Block: a blocked 1:1 still moved and exposed the cursor; a group across a block exposed delivery times | Medium | **Fixed.** Blocked 1:1 rows are hidden, and there are no delivery acks where any block exists. Tests B3b, B3c, B6, B7 |
+| iOS `notification.date` is in seconds, so every iOS tap would have been dropped as "stale" | Medium | **Fixed.** The tap time is used instead |
+| A member who declined could still read the sender's receipts | Low | **Fixed.** The caller must be active or request. Test D1 |
+| Group raw `last_read_at` across a block | Info | Residual, pre-existing; see §3 |
+
+Otherwise clean:
+- Nobody can move another person's cursor; there is no update policy, and cursors only come from server message times.
+- No membership probing; anon is refused.
+- `search_path` is set on every function; 0011 is idempotent; RLS stays on; no `with check (true)`.
+- No secrets, JWTs or OTPs in the client or the logs.
+
+## 8 · App Review Demo (Part 28)
+
+- Still deterministic and local: zero Supabase, analytics, push registration and OTP. `review_test.py` was re-run.
+- The Demo chat backend implements the same cursor rules in memory.
+- Demo people never read anything on their own, so what you send in the Demo stays "Sent". The Demo never fakes "Seen".
+
+## 9 · Posting reliability + recording video in Chimp (high priority)
+
+**What testers saw:**
+- Posting was fast on one iPhone but slow on another, and sometimes never finished.
+- A photo taken in Chimp was lost when its post failed, because it was never in the iPhone's Photos.
+
+**The rule now:** a photo or video captured in Chimp is never lost because a post failed.
+
+### Root causes found in the audit
+
+| # | Cause | Effect |
+|---|---|---|
+| 1 | Chimp's camera returns a file in the app's temporary cache. Nothing saved it to Photos. | A failed post plus a closed composer meant the moment was gone. |
+| 2 | Library photos were picked at quality 0.9. iOS then decodes every 24–48 MP HEIC to full size and writes a full-size JPEG before Chimp resizes it again. | Seconds per photo, a memory spike, and possibly the app being killed. This is much worse on some phones: more memory pressure, 48 MP shots, or photos stored in iCloud. |
+| 3 | No step had a timeout: photo uploads, database inserts, and the video upload. The video used an iOS **background** session, which waits indefinitely when the connection drops. | "It never posts" on flaky Wi-Fi or cellular. |
+| 4 | Drift and Story posts weren't idempotent, and a retry re-uploaded every photo. | Duplicate posts after a lost response, and slow retries. |
+| 5 | Leaving the composer threw the attempt away. | Nothing was left to recover. |
+
+### What changed
+
+**1. A capture is preserved the moment it's taken, before any network work** (`services/capture.ts`)
+- **Kept copy:** a durable copy goes into Chimp's own Documents folder (`post-drafts/{draft}/`). It's copied to a temporary name and then renamed, so a crash never leaves half a file.
+- **Photos:** it's also saved to the iPhone's Photos library when you allow it. Chimp asks once for **add-only** access, which lets it add to the library but never read or delete.
+- **If you decline:** posting still works, and the photo stays in Chimp until it's posted or you discard it.
+- **Library picks** are already in Photos and are never duplicated.
+- **Disk full:** if the copy fails (for example, the iPhone's storage is full), the composer says so plainly. It never claims the photo is safe.
+
+**2. A durable post draft** (`services/postDrafts.ts`, saved on the phone and per account)
+- **What it holds:**
+  - text, poll, World or Story target;
+  - the media, as kept files, with type, size and Photos status;
+  - upload state: uploaded file ids and paths;
+  - attempts and the last error.
+- **No secrets:** only ids, storage paths and public URLs.
+- **When it's saved:** as soon as something is captured, and again on every Post tap before anything is uploaded.
+- **Recovery after a crash, kill or "Keep draft":** the main tabs show **"You have an unfinished post"** with Continue, Retry and Discard.
+  - A post that was mid-flight is shown as "Chimp closed before it was posted. Your photo is safe."
+  - Only the signed-in account's drafts are shown, never another account's on the same phone.
+  - Drafts are capped at 12. A capture that exists only in Chimp is never dropped.
+
+**3. Clear states instead of a spinner** (`components/create/PostStatus.tsx`)
+- **While it works:** Preparing…, then Uploading 2 of 4… 45%, then Posting…, with a progress bar and "Keep Chimp open until it's posted."
+- **Cancel becomes Stop** while it works. Stop keeps the draft.
+- **If it fails:** for example "Couldn't post. Your photo is safe. You seem to be offline." The reason varies:
+  - offline;
+  - the connection stopped responding;
+  - the upload didn't go through;
+  - the session expired;
+  - or the app's own one-line reason.
+- **Then you choose** Try again, Keep draft or Discard.
+- **Discard warns you** if the photo or video isn't in your Photos: "Discarding deletes it for good."
+- **Success** is shown only after the server confirms the post row.
+
+**4. Idempotent retries**
+- **Stable post id:** the draft id is the post's id, for Buzz, Drift and Story.
+  - A retry after a lost response finds the existing post (duplicate key, then select) instead of creating a second one.
+  - Double or triple taps and repeated Retry presses run once.
+- **Stable file paths:** each file goes to `{folder}/{you}/{postId}-{key}.jpg|mp4`.
+  - Files already uploaded and recorded are reused, never sent again.
+  - A file that arrived but wasn't recorded (the app was killed) is found: the server returns "already exists", and on a retry a quick check runs before re-sending.
+- **Media keys are never reused:** removing a photo and adding another can't mix up their files.
+- **Orphaned files are cleaned up:**
+  - **Discard** removes the draft's server files by path.
+  - **Before deleting,** it checks that the post really doesn't exist, so a lost-response post keeps its photos.
+  - **Offline** clean-ups wait in a queue and are re-checked later.
+  - **After a successful post,** files of photos you removed are deleted.
+
+**5. Network and app lifecycle**
+- **Uploads stream from the file,** never loaded into memory, using a **foreground** iOS session.
+- **Stall watchdog:** no progress for 30 seconds means the upload is cancelled and reported.
+- **Database writes** time out after 20 seconds.
+- **Expired token:** refreshed once and the upload re-sent. If refreshing fails because the phone is offline, you're told you're offline, not that you're signed out.
+- **One quiet automatic retry** happens for a dropped connection, a stall or a server hiccup. Then you're asked.
+- **No background uploading is claimed.** If you leave Chimp, iOS may stop the upload. You're retried automatically once, and anything unfinished is offered when you return.
+
+**6. Media optimisation, a different policy per type**
+
+| Media | Policy |
+|---|---|
+| Photos (Buzz, Drift, chat) | Long edge 1600 px, JPEG 0.8, one resize on the phone. The picker now hands over the original file without re-encoding it. |
+| Story | 1600 px |
+| World cover | 1800 px |
+| Avatar | 1200 px |
+| Video from Photos | iOS export at 960×540 H.264, up to 60 s / 50 MB (unchanged) |
+| **Video recorded in Chimp** | **720p H.264 at about 3.5 Mbit/s: roughly 26 MB a minute**, up to 60 s, with a 45 MB safety stop |
+
+- Camera captures are kept at high quality (0.92) for the copy you keep in Photos. The upload copy is resized.
+
+**7. New: record a video without leaving Chimp** (`app/create/record.tsx`)
+- **In the Buzz composer,** **Record** opens Chimp's own full-screen recorder. The library option remains, labelled **Video**.
+- **What the recorder shows:**
+  - a 0:12 / 1:00 timer and a progress bar;
+  - "10 seconds left";
+  - a flip-camera button;
+  - controls placed from the phone's real safe area.
+- **It stops by itself at 60 seconds.**
+- **No microphone access** means it records without sound and says so.
+- **When recording stops,** the clip and its poster frame are kept in Chimp and saved to Photos (if allowed), before anything is uploaded.
+- **Closing while recording** discards that clip. You chose to leave.
+- **New native modules:** `expo-camera` (camera and microphone), `expo-media-library` (save to Photos) and `expo-file-system` (now listed explicitly). **These need the next EAS build.**
+
+### Permission text (Info.plist, via config plugins)
+
+| Permission | Text |
+|---|---|
+| Camera | "Chimp uses the camera so you can take photos and record short videos to post." |
+| Microphone | "Chimp uses the microphone to record sound for videos you record, and voice notes in After Dark." |
+| Photos (read) | "Chimp uses your photos so you can share them in posts, stories and your profile." |
+| Photos (add) | "Chimp saves photos and videos you take in Chimp to your library, so they're never lost if a post doesn't go through." |
+
+### Independent review (posting)
+
+A separate agent reviewed the posting code read-only. It found **1 critical, 3 high and 5 medium** issues, plus some low ones. **All were fixed and re-tested.**
+
+- **Critical: media keys were reused after remove-then-add.** A removed photo's kept or uploaded file could stand in for the new photo.
+  - **Fix:** keys are unique and never reused, and removal updates the stored draft.
+- **High: kept folders could be tidied before saved drafts loaded.**
+  - **Fix:** tidying waits for drafts to load, and loading merges instead of replacing.
+- **High: Discard while offline could delete files of a post that did land.**
+  - **Fix:** files are deleted only when the post is confirmed absent. Otherwise the clean-up is queued and re-checked.
+- **High: in the Demo, posted photos broke because their kept files were deleted.**
+  - **Fix:** Demo keeps them, and tidying leaves them alone.
+- **Medium: a recorded clip didn't replace an earlier one in the stored draft.**
+  - **Fix:** the new clip now replaces the old one.
+- **Medium: a killed app re-sent a whole file on retry.**
+  - **Fix:** a check runs before re-sending.
+- **Medium: a half-written kept copy after a crash.**
+  - **Fix:** the copy goes to a temporary name and is then renamed.
+- **Medium: a failed keep was silent.**
+  - **Fix:** there is now a "Not saved anywhere yet" warning.
+- **Medium: wrong failure wording.**
+  - **Fix:** a Storage refusal is no longer called an expired session, and "Upload failed" is no longer called offline.
+- **Medium: some lookups had no timeout.**
+  - **Fix:** they now time out after 20 seconds.
+- **Low: drafts dropped by the cap left server files behind.**
+  - **Fix:** their files are queued for clean-up.
+- **Low: a draft the server confirmed could be left behind if the app closed first.**
+  - **Fix:** it is tidied on the next launch.
+- **Low: a Photos status that arrived during posting could be overwritten.**
+  - **Fix:** it is kept.
+- **Low: closing the recorder mid-recording went back twice.**
+  - **Fix:** it now goes back once.
+- **Known web-only limit:** a draft's photo picked in a browser is a temporary `blob:` URL that dies on reload. iPhone drafts use real files.
+
+### Tested (simulated, not an iPhone)
+
+- **Node, `p9`: 41/41.** Covers:
+  - kept copies: atomic, survive cache clearing, report a disk-full failure;
+  - add-only Photos permission: asks once, never nags after "no", never throws;
+  - draft persistence and "interrupted" after restart;
+  - double-tap lock, failure copy, and video plus poster preservation;
+  - unique keys, waiting for drafts to load, and Demo files staying.
+- **Web, `post9`: 31/31** against a mock that mirrors Storage and PostgREST: 409 on duplicate files, 23505 on duplicate rows, injected failures, hangs, delays and lost responses. Covers:
+  - text and photo posts;
+  - an automatic retry after one dropped upload;
+  - a persistent failure showing the clear message and the three choices;
+  - post-row failure: the retry reuses the upload;
+  - a lost response giving one post, and a triple tap giving one post;
+  - Keep draft, then the card, then a restart, then Retry;
+  - a kill after the upload: reopened as "Chimp closed before it was posted", with no re-upload on Retry;
+  - Discard removing the server file and media row;
+  - offline, then back online, then Try again;
+  - Stop mid-upload, a Drift lost response, and a Story;
+  - the recorder screen opening and closing.
+- **Updated old test:** 6C's "interrupted upload" test now expects the automatic retry.
+- **Not testable here:** saving to Photos, kept files on iOS, the real camera, a real network and memory, and backgrounding. All of these are in the device checklist.
+
+### Real-iPhone posting checklist
+
+Do this on **your phone (fast), your friend's phone (the slow one), your brother's iPhone 16, and an iPhone 17**, all on the new build.
+
+| # | Test | Pass when |
+|---|---|---|
+| P1 | Photo from Photos → Post (Wi-Fi, then cellular) | Preparing → Uploading → Posting, then it posts. Note the seconds on each phone. |
+| P2 | **Take a photo in Chimp** → Post | The first time, iOS asks to **add** to Photos. The photo appears in Photos **before** posting finishes. |
+| P3 | Take a photo, turn on **Airplane Mode**, Post | "Couldn't post. Your photo is safe. You seem to be offline." Keep draft. The photo is in Photos. |
+| P4 | Airplane Mode off → the "unfinished post" card → Retry | Posts once (check the feed for duplicates). |
+| P5 | Take a photo, Post, then **swipe the app away** during "Uploading…" | Reopen: "You have an unfinished post … Chimp closed before it was posted." Retry posts once. |
+| P6 | **Record a video in Chimp** (Record) for about 20 s → Post | The clip is in Photos right away. Upload progress is shown, and it posts and plays. |
+| P7 | Record and let it run to 60 s | It stops by itself at 1:00. |
+| P8 | Deny Photos (Settings → Chimp → Photos → None), take a photo, Airplane Mode, Post → Keep draft, force-quit, reopen | The card offers it. Discard warns "isn't in your Photos". Keep it, go online, Retry: it posts. |
+| P9 | Video from Photos → Post on the slow phone | No endless spinner. Either it posts, or after about 30 s without progress there's a clear error with Try again. |
+| P10 | Text-only Buzz, a Board (World) post, a Story | Each posts once. |
+| P11 | Press Home during "Uploading…", wait 1 minute, come back | Either it finished, retried by itself, or shows the error and keeps the draft. Never a silent loss. |
+| P12 | Double-tap Post | One post. |
+
+If P1 is still slow on your friend's phone, note the photo's resolution (Settings → Camera → Formats) and whether the photo shows a cloud icon in Photos. iCloud photos have to download first, and that delay is iOS's, before Chimp has the photo.
+
+## 10 · Content ordering + profile Recent Posts (pre-TestFlight)
+
+No schema, migration, RLS, messaging, posting-pipeline or Opportunity Graph changes. Every surface sorts the rows the app already loads (the newest 300 Buzz and 300 Drift the account may see, fetched `order by created_at desc`), so no new query or index is needed.
+
+### Ordering rules (`src/utils/feedOrder.ts`, pure and unit-tested)
+
+| Surface | Order | Where |
+|---|---|---|
+| Buzz → **For You** | Newest first (`created_at` desc). No engagement or graph ranking; your new post is simply the newest. | `graph/surfaces.ts → buzzFeed('forYou')` |
+| Buzz → **Following** | Newest first, from people and Worlds you follow (unchanged rule). | `rankBuzz('following')` |
+| Buzz → **Trending** | Engagement score (below). | `rankBuzz('trending')` |
+| **Drift** (Buzz tab and the full-screen viewer) | Newest first, World photos/videos and photo/video Buzz together. | `buildDriftFeed`, `driftQueue` |
+| Board → **Today** | Cover: the newest photo/video created today. If today's posts can't be a cover (text-only, for instance), there's no cover, so nothing older sits above them. With nothing new today, the cover is the graph's choice as before. Then **New today** (today's posts, newest first) and **Earlier** (older posts, newest first) underneath. Then the edition's modules, in the same graph order as before. | `buildEdition → latest`, `Edition.tsx → LatestPosts` |
+| Board → **Buzzing** (Today module) | Engagement score; top 3. Nothing pinned. | `buildEdition` |
+| Board → **Explore** | The World's posts (Board posts, Buzz, World photos/videos) newest first, so you scroll down into older posts. Tips, Stories and Moves keep their graph order and are slotted in after every 5 posts without changing the posts' order. Related Worlds follow, each with its own "More from …" marker, also newest first. | `buildExplore` |
+| Profile → **Recent posts** | Newest first. | `recentPostsFor` |
+
+"Today" means since local midnight on the phone. All comparators end with "newest, then id", so the order is total and repeatable.
+
+**Pagination.** Every list is sorted in full first, then shown page by page: the Buzz FlatList rows, Explore's 12 at a time, Today's "Show more", the profile grid's 12 at a time, and Drift's first 60. A later page never reorders an earlier one; the tests check pages joined back equal the full order. Trending and Buzzing rank within the loaded window (newest 300), so a viral post older than that isn't a candidate, which suits the recency intent.
+
+### Trending / Buzzing formula
+
+```
+engagement    = likes × 1 + comments × 1.5
+aged          = engagement × 0.5^(ageDays / 7)        // 0.9 after a day, ½ after a week, ¼ after two
+recency boost = 6 × 0.5^(ageHours / 24)               // 6 → 3 after a day → ~0 after a week
+score         = aged + recency boost                   // ties: newest, then id
+```
+
+- **Likes** are the real totals, including yours. **Comments** are the post's replies (Buzz `replyCount`).
+- **Why the aging term:** a purely additive boost can't stop an old viral post staying on top forever, because its lead never shrinks. Gentle aging fixes that, while engagement still decides for posts a day or two apart.
+- **No reshuffling while you read:** the Buzz tab fixes the ranking time while you read. It moves on when you switch tabs or pull to refresh. New likes, new comments and new posts still update the order at once.
+- **Examples (tested):**
+  - 30 likes 2 days ago beats 10 likes now.
+  - 10 likes now beats 40 likes 3 weeks ago.
+  - 200 likes 90 days ago is below 15 likes today.
+  - 500 likes 30 days ago is below 50 likes today.
+  - 14 likes + 6 comments beats 14 likes.
+- **Tuning:** the constants are in `ENGAGEMENT` (`utils/feedOrder.ts`).
+
+### Profile → Recent posts (`components/profile/RecentPosts.tsx`)
+
+- **Where:** on other people's profiles (after Boards, before Moves) and on **You** (after your Boards).
+- **What it shows:**
+  - The person's **Buzz** and **World photo/video posts** (Drift), combined.
+  - A 3-column grid of square tiles: photo, video poster (▶ badge) or several photos (⧉ badge).
+  - Text-only Buzz and polls appear as a small text card.
+  - Tapping a tile opens the post: `/buzz/<id>` or `/drift/<id>`.
+- **Live updates:** it's built from the same items the feeds show (no copies). A new post appears first at once; an edit or deletion shows at once.
+- **What the viewer may see:**
+  - Nothing from someone you blocked: "You blocked X, so their posts are hidden".
+  - Never After Dark.
+  - Never a World you can't see. `canViewBoard` mirrors the server's `can_see_board`: public, owner, member, or Connections-and-connected. RLS still decides what a real account ever receives; this keeps cached and Demo data to the same rule.
+- **Empty state:**
+  - On You: "No posts yet" and "Create a post".
+  - On someone else's profile: "No recent posts".
+- **Known limit:** the grid is built from what the app has loaded (the newest 300 Buzz and 300 World posts across Chimp). It only says "recent" for that reason. A person whose last post is older than that window shows "No recent posts".
+  - **Follow-up if that becomes visible as usage grows:** a per-author query (`buzz_items` / `drift_items` by `author_id`, still under RLS). With it, indexes on `(author_id, created_at desc)`, and on `created_at desc` for the main feed (none exist today).
+  - That's a DB change, so it's described here, not implemented.
+- **Blocks:** posts from someone **who blocked you** aren't hidden. The server's content read rules don't consider blocks, and the app only knows whom *you* blocked. The feeds already behave this way; this update doesn't change it.
+- **Not included:** Demo-only Board posts (fixtures) have no full-post screen, so they're left out.
+
+### Tests
+
+- **Node `o10.ts`:** 80 checks covering the rules, every surface on a REAL fixture, privacy, live updates, pagination and Demo isolation.
+- **Web `o10_web.py`:** 25 checks covering the REAL account against the mock: tab order, Today / Buzzing / Explore, the grid geometry, tile taps, private / blocked / empty, and your new post appearing at once.
+- **`c6.ts`:** one Trending expectation was updated to the new rule. 12 likes 6 h ago now passes 20 likes 3 days ago.
+
+### iPhone checks (not run on a device)
+
+| # | Do | Expect |
+|---|---|---|
+| O1 | Post a text Buzz | It's first in For You and first in your Recent posts. |
+| O2 | Following / Drift | Newest first. |
+| O3 | Like and comment on an older post, then switch tabs or pull to refresh | It rises in Trending. A fresh post with a few likes can pass a much older one. |
+| O4 | Open a World with posts from today and earlier | Cover and **New today** first, newest first, then **Earlier**. Buzzing shows the most-liked/commented. |
+| O5 | Explore, scroll to "Keep exploring" twice | The order continues into older posts and never jumps. |
+| O6 | Open a friend's profile | 3-column grid, newest first, photos/videos as thumbnails, text as cards. Tap opens the post. |
+| O7 | Open the profile of someone with a post in a private World you're not in | That post isn't in the grid. |
+| O8 | A new account's You | Clean "No posts yet". |
+
+---
+
+## Files
+
+**New:**
+- `supabase/migrations/0011_phase8_device_messaging.sql`
+- `src/components/system/SafeArea.tsx` (`DeviceInsetsProvider`, `useDeviceInsets`, `FullscreenTopBar`)
+- `src/theme/safeArea.ts`
+- `src/utils/receipts.ts`
+- `src/components/chat/SeenBySheet.tsx`
+- `src/services/backend/realtimeTopic.ts`
+- Posting reliability:
+  - `src/services/capture.ts`
+  - `src/services/postDrafts.ts`
+  - `src/utils/postDraft.ts`
+  - `src/components/create/useDraftComposer.ts`, `PostStatus.tsx`, `UnfinishedPostCard.tsx`
+  - `src/app/create/record.tsx` (in-app video recorder)
+
+**Changed:**
+- `_layout.tsx` (device-insets provider, `pushGate`)
+- `board/[id].tsx`, `BoardTabs.tsx`
+- `MediaViewer.tsx`, `StoryViewer.tsx`, `drift/[id].tsx`, `VibeChat.tsx`
+- Modal sheets: `MessageMenu`, `LoopsSheet`, `PingSheet`, `OwnerMenu`, `WorldOwnerMenu`, `VibeParts`
+- `theme/layout.ts`, `hooks/useLayout.ts`
+- `services/backend/chat.ts`, `chatApi.ts`, `demoChat.ts`, `push.ts`, `pushRoutes.ts`
+- Realtime topics in `backend/afterDark.ts` and `backend/people.ts`
+- Posting reliability:
+  - `services/create.ts`, `backend/media.ts`, `backend/content.ts`
+  - `app/create/buzz.tsx`, `drift.tsx`, `story.tsx`, `CreateParts.tsx`
+  - `app.json` (plugins and permission texts), `package.json` / `package-lock.json`
+- `store/useChat.ts`, `ChatBubble.tsx`, `ConversationBody.tsx`, `RealChat.tsx`
+- Content ordering + Recent posts (section 10):
+  - **New:** `src/utils/feedOrder.ts`, `src/components/profile/RecentPosts.tsx`
+  - **Changed:**
+    - `graph/surfaces.ts` (`buzzFeed`, `visibleBuzz`, Trending, `buildDriftFeed`, `driftQueue`, `canViewBoard`, `recentPostsFor`)
+    - `graph/worlds.ts` (Today `latest` and cover, Buzzing, Explore)
+    - `components/boards/Edition.tsx`
+    - `app/(tabs)/buzz.tsx`, `app/drift/[id].tsx`, `app/profile/[id].tsx`, `app/(tabs)/you.tsx`
+    - `utils/buzzRows.ts` (comment only)
+
+## Tested locally (simulated; not an iPhone)
+
+| Suite | Result |
+|---|---|
+| TypeScript (`tsc --noEmit`) / `expo lint` | Clean / clean |
+| **DB: `pg_8_test` (0011: cursors, receipts, Vibe policy D, requests, blocks, groups, Build 5 compatibility)** | **53/53** |
+| DB: the 10 earlier suites (0002–0010) | **Identical with and without 0011** (chat 35, msg 113, 6D 62, 7B 122, 7C 96, Build 5 18, …). The few legacy failures in old 6C/7A files are the same before and after; they test flows that later migrations replaced, e.g. 7A view-once before 7B's private path |
+| DB: 0011 applied twice (idempotent) | ✓ |
+| Node: `p8` (receipts, server-µs time, safe-area rules, Board pin rule, nested routes, `pushGate`, chat store Seen/Delivered/receipts/cursor events/sign-out) | **52/52** |
+| Node: m7 38 · a7 90 · t7 14 · p7 19 · b7 55 · c7client 24 · i7 45 · push7 30 · c6 56 · scenario6 | All pass |
+| **Node: `p9` posting (capture preservation, Photos permission, drafts, runner, review fixes)** | **41/41** |
+| **Web: `post9_test` posting (retries, idempotency, drafts, restart / kill recovery, discard clean-up, offline, Stop, Drift, Story, recorder screen)** | **31/31** |
+| Web: **`msg8_test`**: Sent → Delivered → Seen across browsers, background vs foreground, one status line, group "Seen by N" plus sheet, no write-per-render, no 0011 → "Sent" only | **20/20** |
+| Web: **`r8_layout`**: 8 iPhone families with simulated safe areas | **248/248** |
+| Web: l7_layout 88 · c7_web 18 · ad7 (390) 56 · ad7 (375) 56 · App Review 31 · ph_web 36 · ad7_sweep 12 · ad7_real 6 · b7_web 23 · tt7_web 10 · chat 38 · m7 80 · b5p2 13 · b5_nav 31 · d6 72 · av 15 · dw 29 · 6C regression 33 | All pass |
+| Web: c6_6d (V5–V8 updated: interrupted video uploads now retry automatically) | 68/69. "A4 Buzz ready before the network load" is the known timing flake (it failed the same way in 7C) |
+| Long-session cycle / Demo sweep | Completed, 0 page errors / 0 errors |
+
+Test updates made because of intended changes:
+- `b7` now finds the events channel by prefix (Realtime topics now carry a unique suffix).
+- `b5_nav`:
+  - The label-size check now follows Build 5's own rule (15 pt below 390 pt wide).
+  - The keyboard check now tests what a browser can: the bar steps aside and no spacer is left. Lifting the composer is iOS `KeyboardAvoidingView`, which is native only, so it's in checklist #14.
+- The legacy 6B chat mock now answers like a project **without** 0011 (PostgREST "function not found"), so the old suites exercise the fallback.
+
+**Device matrix (simulated safe areas, Part 24).**
+
+| Family (approx.) | Points | Top / bottom inset |
+|---|---|---|
+| iPhone 12/13 mini | 375×812 | 50 / 34 |
+| iPhone 12/13/14 | 390×844 | 47 / 34 |
+| iPhone 15/16 (Dynamic Island) | 393×852 | 59 / 34 |
+| iPhone 16 Pro / 17 / 17 Pro | 402×874 | 62 / 34 |
+| iPhone 12/13 Pro Max, 14 Plus | 428×926 | 47 / 34 |
+| iPhone 15/16 Plus & Pro Max | 430×932 | 59 / 34 |
+| iPhone 16/17 Pro Max | 440×956 | 62 / 34 |
+| iPhone SE | 375×667 | 20 / 0 |
+
+On each family, the tests checked:
+- headers and Back below the status bar;
+- Board tabs pinned, at 3 scroll depths, never under the status bar;
+- the photo viewer close X at ≥ inset + 8 and 44 × 44;
+- the bottom bar clear of the home indicator;
+- the chat composer above the bar;
+- sign-in and After Dark;
+- no horizontal overflow.
+
+**Regression fixture (Part 5).** `r8_layout.py` is the Board-under-status-bar fixture.
+- It **fails on the pre-Phase-8 build:** tabs at y = −14 on a 62-pt Dynamic Island phone, and the close X at 66 < 70.
+- It **passes on Phase 8.**
+- **Limit:** the iOS-only "Modal reports top 0" behaviour can't be reproduced in a browser. That part has to be confirmed on an iPhone.
+
+## Real-device checklist (Part 25), closing Phase 8
+
+The three phones:
+- **Your primary iPhone.**
+- **Friend's iPhone 17 (base):** 402×874, Dynamic Island, top ≈ 62.
+- **Brother's iPhone 16 (base):** 393×852, Dynamic Island, top ≈ 59.
+
+Do all three on the new build, after running 0011. Fourteen priority checks, in order:
+
+| # | Check | Pass when |
+|---|---|---|
+| 1 | Open any photo full screen (Buzz post, chat photo) | The X sits clearly **below** the Dynamic Island / status bar, never touching it; one tap closes it |
+| 2 | Play a video full screen | Video fits; the X and caption stay on screen; the home indicator isn't covered |
+| 3 | Story viewer and Drift (Happening) | The progress bar and X are below the Dynamic Island |
+| 4 | After Dark: send and open a view-once photo | The X and the "View once…" line are below the Dynamic Island; the photo can be opened once |
+| 5 | Board → scroll down | Today / Explore / People pin **below** the status bar with a solid background; the status bar text stays readable |
+| 6 | App Review Demo: repeat 1 and 5 | Same, with the yellow banner present |
+| 7 | 1:1: A sends while B's app is closed → A sees "Sent" | Only "Sent" |
+| 8 | B opens the app (not the chat) | A sees "Delivered" within a few seconds without refreshing |
+| 9 | B opens the chat | A sees "Seen" live. Then B locks the phone with the chat still open and A sends again: A sees "Sent" or "Delivered" (iOS may pause B's app) — never "Seen" — until B unlocks and looks |
+| 10 | Group of 3: one person reads | "Seen by 1", tap shows that one name; when the third reads, "Seen by everyone" |
+| 11 | After Dark Vibe | No Sent/Delivered/Seen anywhere, for either person |
+| 12 | Push tap with the app killed (message from the other phone) | Opens that chat once signed in; a later normal launch doesn't reopen it |
+| 13 | Unread: badge counts go to 0 when you read; sign out and sign in as another account | No old unread counts or chats carry over |
+| 14 | Keyboard in a chat (all three phones) | The bottom bar hides, the composer sits on the keyboard, nothing overlaps; after dismissing, the bar returns |
+
+If 1–6 pass on the iPhone 16 and 17, the reported bugs are closed. If anything fails, send a screenshot and the phone model.
+
+## Final status: TestFlight readiness
+
+| Item | Status |
+|---|---|
+| TypeScript / lint | Clean |
+| DB tests incl. 0011 (local Postgres) | Pass (53/53 new; earlier suites unchanged) |
+| Node / web regression (simulated) | Pass, except one known timing flake (c6 A4) |
+| Migration 0011 on your Supabase | **To do** (step 1) |
+| `npm install` (new packages) | **To do** |
+| EAS build | **Required** (2 new native modules). Not started (your call) |
+| Real-iPhone posting checks (P1–P12, four phones) | **To do** |
+| Real-iPhone checks (iPhone 16, 17, yours) | **To do.** These close Phase 8 |
+| Opportunity Graph v2 | Not touched (out of scope) |
+| Commits / push / merge | None made |
+
+
 # Chimp build notes — v0.7C — Product Polish, Early Opportunity Intelligence, Push & Build Readiness
 
 2 Oct 2026 · branch `phase-7`.

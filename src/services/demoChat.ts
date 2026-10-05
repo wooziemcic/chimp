@@ -216,6 +216,27 @@ export const demoChatApi: ChatApi = {
     const me = d().members.find((m) => m.conversation_id === cid && m.user_id === ME_ID);
     if (me) me.last_read_at = new Date().toISOString();
   },
+  // Phase 8: the same cursor rules as 0011, in memory. Demo people never read
+  // or receive anything new on their own, so what you send stays "Sent" —
+  // the Demo never pretends someone saw it.
+  markReadUpto: async (cid, messageId) => {
+    const me = d().members.find((m) => m.conversation_id === cid && m.user_id === ME_ID && m.status !== 'left');
+    if (!me) return;
+    const msgs = d().messages.filter((m) => m.conversation_id === cid);
+    const upto = messageId ? msgs.find((m) => m.id === messageId)?.created_at : msgs.map((m) => m.created_at).sort().pop();
+    if (upto && upto > me.last_read_at) me.last_read_at = upto;
+  },
+  markDelivered: async () => 0,
+  fetchReceipts: async (cid) => {
+    const c = conv(cid);
+    if (!c || c.kind === 'vibe' || !isMember(cid)) return [];
+    return d()
+      .members.filter((m) => m.conversation_id === cid && (m.user_id === ME_ID || m.status === 'active' || m.status === 'request'))
+      .map((m) => {
+        const shown = m.user_id === ME_ID || m.status === 'active';
+        return { user_id: m.user_id, status: m.status, joined_at: m.joined_at, read_at: shown ? m.last_read_at : null, delivered_at: shown ? m.last_read_at : null };
+      });
+  },
   respondToRequest: async () => undefined,
   startConversation: async () => deny('Demo 1:1 chats live on each person’s profile.'),
   deleteMessage: async (id) => {

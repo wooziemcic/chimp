@@ -2,8 +2,8 @@ import { router } from 'expo-router';
 import { Settings, Trash2 } from 'lucide-react-native';
 import { useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, StyleSheet, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useDeviceInsets } from '@/components/system/SafeArea';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { deleteMyWorld } from '@/services/backend/ownContent';
@@ -18,7 +18,7 @@ import type { Board } from '@/types/models';
  * ownership again before anything is deleted.
  */
 export function WorldOwnerMenu({ board, open, onClose }: { board: Board; open: boolean; onClose: () => void }) {
-  const insets = useSafeAreaInsets();
+  const insets = useDeviceInsets(); // Phase 8: a Modal sheet covers the whole phone → its real insets
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

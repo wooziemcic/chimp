@@ -3,10 +3,11 @@ import { StatusBar } from 'expo-status-bar';
 import { Camera, CircleFadingPlus, Film, PenLine, Sparkles } from 'lucide-react-native';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AfterDarkWorld } from '@/components/afterdark/AfterDarkWorld';
 import { BoardHero, HERO_HEIGHT } from '@/components/boards/BoardHero';
-import { BoardTabs } from '@/components/boards/BoardTabs';
+import { BoardTabs, PIN_GAP, pinAt } from '@/components/boards/BoardTabs';
 import { ExploreStream, TodayEdition } from '@/components/boards/Edition';
 import { WorldPeople } from '@/components/boards/WorldPeople';
 import { Button, EmptyState } from '@/components/ui/misc';
@@ -124,9 +125,19 @@ function StandardBoard({ board, initialTab }: { board: Board; initialTab: string
   );
   const story = repo.storiesFor({ kind: 'board', id: board.id })[0];
 
+  // Phase 8: Today / Explore / People pin BELOW the status bar (they used to be a
+  // sticky header, which pins at the screen's very top — under the clock and the
+  // Dynamic Island, since the hero runs edge to edge). The in-flow tabs scroll
+  // normally; once they would pass under the status bar, the same tabs are shown
+  // pinned at the safe-area top with an opaque status-bar strip behind them.
+  const insets = useSafeAreaInsets();
+  const [tabsY, setTabsY] = useState(HERO_HEIGHT);
+  const [pinned, setPinned] = useState(false);
   const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    if (tab !== 'explore') return;
     const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+    const shouldPin = contentOffset.y >= pinAt(tabsY, insets.top);
+    if (shouldPin !== pinned) setPinned(shouldPin);
+    if (tab !== 'explore') return;
     if (layoutMeasurement.height + contentOffset.y > contentSize.height - 600 && count < explore.length) setCount((c) => c + EXPLORE_PAGE);
   };
   const goExplore = () => {
@@ -136,10 +147,10 @@ function StandardBoard({ board, initialTab }: { board: Board; initialTab: string
 
   return (
     <View style={{ flex: 1, backgroundColor: board.theme.background }}>
-      <StatusBar style="light" />
-      <ScrollView ref={scroller} stickyHeaderIndices={[1]} showsVerticalScrollIndicator={false} onScroll={onScroll} scrollEventThrottle={200} contentContainerStyle={{ paddingBottom: navSpace }}>
+      <StatusBar style={pinned ? (board.theme.mode === 'dark' ? 'light' : 'dark') : 'light'} />
+      <ScrollView ref={scroller} showsVerticalScrollIndicator={false} onScroll={onScroll} scrollEventThrottle={16} contentContainerStyle={{ paddingBottom: navSpace }}>
         <BoardHero board={board} storyId={story?.id} />
-        <View style={[styles.tabsWrap, { backgroundColor: board.theme.background }]}>
+        <View style={[styles.tabsWrap, { backgroundColor: board.theme.background }]} onLayout={(e) => setTabsY(e.nativeEvent.layout.y)} testID="board-tabs-inline">
           <BoardTabs active={tab} onChange={setTab} theme={board.theme} />
         </View>
         <View style={{ backgroundColor: board.theme.background }}>
@@ -182,6 +193,11 @@ function StandardBoard({ board, initialTab }: { board: Board; initialTab: string
           {tab === 'people' ? <WorldPeople board={board} /> : null}
         </View>
       </ScrollView>
+      {pinned ? (
+        <View style={[styles.pinned, { paddingTop: insets.top + PIN_GAP, backgroundColor: board.theme.background, borderBottomColor: board.theme.line }]} testID="board-tabs-pinned">
+          <BoardTabs active={tab} onChange={setTab} theme={board.theme} />
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -215,6 +231,7 @@ const styles = StyleSheet.create({
   contribute: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginHorizontal: 16, marginBottom: 12 },
   contributeBtn: { flexBasis: '47%', flexGrow: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 38, borderRadius: 19, paddingHorizontal: 8 },
   why: { marginHorizontal: 16, marginBottom: 12, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.lg, borderWidth: 1 },
+  pinned: { position: 'absolute', top: 0, left: 0, right: 0, paddingBottom: 10, borderBottomWidth: StyleSheet.hairlineWidth, zIndex: 5 },
   tabsWrap: {
     marginTop: -28,
     borderTopLeftRadius: 28,

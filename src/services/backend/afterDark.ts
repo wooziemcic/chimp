@@ -12,6 +12,7 @@ import type { ChallengeKind } from '@/data/afterDarkChallenges';
 import { mediaUrl, supabase } from '@/lib/supabase';
 import { backendError } from './errors';
 import type { LoopRow } from './chat';
+import { topicSeq } from './realtimeTopic';
 
 const sb = () => supabase();
 
@@ -199,7 +200,7 @@ export const photoUrl = (path: string | null | undefined) => (path ? (/^https?:|
 export function subscribeAfterDark(uid: string, onChange: () => void, opts?: { onStatus?: (status: string) => void; onLoop?: (conversationId: string) => void }): () => void {
   const loop = (p: { new?: { conversation_id?: string } }) => (opts?.onLoop ? p.new?.conversation_id && opts.onLoop(p.new.conversation_id) : onChange());
   const channel: RealtimeChannel = sb()
-    .channel(`afterdark:${uid}`)
+    .channel(`afterdark:${uid}:${topicSeq()}`)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'vibes' }, () => onChange())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'vibe_challenges' }, () => onChange())
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_loops' }, loop)

@@ -13,14 +13,13 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { Segmented } from '@/components/ui/Segmented';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import { type BuzzTab, type FeedEntry, buildDriftFeed, isAfterDarkRef, rankBuzz } from '@/graph/surfaces';
+import { type BuzzTab, type FeedEntry, buildDriftFeed, buzzFeed, isAfterDarkRef } from '@/graph/surfaces';
 import { useGraphCtx, useUnseenChanges } from '@/hooks/useGraph';
 import { useTabBarSpace } from '@/hooks/useLayout';
-import { useNow } from '@/hooks/useNow';
 import { useDataset } from '@/services/dataset';
 import { useSession } from '@/store/useSession';
 import { colors, radius } from '@/theme';
-import { packRows, pinFresh } from '@/utils/buzzRows';
+import { packRows } from '@/utils/buzzRows';
 
 type Tab = BuzzTab | 'drift';
 
@@ -36,12 +35,12 @@ const TABS: { id: Tab; label: string }[] = [
  * Chimp's conversation layer: thoughts, takes, photos, videos, polls and
  * (demo) news. A World is optional context, never required.
  *
- * Phase 6C — four sub-tabs, each with its own ordering:
- *   For You    the graph's ranking (with a freshness boost). Your own posts
- *              from the last 30 minutes lead, newest first.
- *   Following  people and Worlds you chose (and you), newest first.
- *   Trending   most likes first (real totals), then newest. Nothing pins here.
- *   Drift      full-screen vertical media (photos, videos, World media).
+ * Four sub-tabs, each with its own ordering (graph/surfaces → buzzFeed,
+ * rules in utils/feedOrder):
+ *   For You    newest first (created_at desc). No engagement ranking.
+ *   Following  people and Worlds you follow, newest first.
+ *   Trending   likes + comments, with a small recency boost (engagementScore).
+ *   Drift      full-screen photos and videos, newest first.
  */
 export default function BuzzScreen() {
   // `/buzz?tab=drift` (e.g. an old Drift link) opens straight into that sub-tab.
@@ -66,14 +65,19 @@ export default function BuzzScreen() {
   const refreshLikes = useSession((s) => s.refreshLikes);
   const data = useDataset();
   const real = data.mode === 'real';
-  const now = useNow();
-  const rows = useMemo(() => {
-    if (tab === 'drift') return [];
-    const ranked = rankBuzz(ctx, tab).map((x) => x.item);
-    return packRows(tab === 'forYou' ? pinFresh(ranked, (id) => !!id && id === data.me.id, now) : ranked);
-  }, [ctx, tab, now, data.me.id]);
+  // Ranking time is fixed while you read a tab (Trending's recency boost would
+  // otherwise shuffle it as the minutes pass); it moves on when you switch tabs
+  // or pull to refresh. New posts and new likes still update it at once.
+  const [orderAt, setOrderAt] = useState(() => Date.now());
+  const pickTab = (t: Tab) => {
+    setTab(t);
+    setOrderAt(Date.now());
+  };
+  // The whole list is ordered first, then shown row by row, so the order holds
+  // all the way down (not just on the first screen).
+  const rows = useMemo(() => (tab === 'drift' ? [] : packRows(buzzFeed(ctx, tab, orderAt))), [ctx, tab, orderAt]);
 
-  // Trending is "most liked": keep the real totals current while you're looking at it.
+  // Trending ranks by likes and comments: keep the real totals current while you're looking at it.
   useEffect(() => {
     if (tab !== 'trending' || !real) return;
     void refreshLikes();
@@ -94,7 +98,7 @@ export default function BuzzScreen() {
   }
   const [driftH, setDriftH] = useState(0);
 
-  const tabs = <Segmented value={tab} onChange={setTab} options={TABS} dark={tab === 'drift'} />;
+  const tabs = <Segmented value={tab} onChange={pickTab} options={TABS} dark={tab === 'drift'} />;
 
   if (tab === 'drift') {
     return (
@@ -132,7 +136,14 @@ export default function BuzzScreen() {
         windowSize={7}
         contentContainerStyle={{ paddingBottom: bottom, gap: 10 }}
         refreshing={real ? syncing && !loading : false}
-        onRefresh={real ? () => void refresh() : undefined}
+        onRefresh={
+          real
+            ? () => {
+                setOrderAt(Date.now());
+                void refresh();
+              }
+            : undefined
+        }
         ListHeaderComponent={
           <View style={{ marginBottom: 4 }}>
             <PageHeader title="Buzz" subtitle="Thoughts. Photos. Takes. Real people." right={<CreateButton href="/create" />} />

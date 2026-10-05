@@ -16,7 +16,6 @@ import Animated, {
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { scheduleOnRN } from 'react-native-worklets';
 
 import { Avatar } from '@/components/ui/Avatar';
@@ -26,6 +25,7 @@ import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
 import { colors } from '@/theme';
 import type { Story, StoryItem } from '@/types/models';
+import { fullscreenTop, useDeviceInsets } from '@/components/system/SafeArea';
 
 interface Props {
   queue: Story[];
@@ -40,7 +40,8 @@ type PauseReason = 'hold' | 'pinch' | 'input' | 'pan';
  * pinch = zoom (springs back) · swipe down = close.
  */
 export function StoryViewer({ queue, startIndex }: Props) {
-  const insets = useSafeAreaInsets();
+  // Phase 8: full-screen route (covers the App Review banner too) → the phone's real insets.
+  const insets = useDeviceInsets();
   const { width, height } = useWindowDimensions();
   const [storyIdx, setStoryIdx] = useState(startIndex);
   const [itemIdx, setItemIdx] = useState(0);
@@ -248,7 +249,7 @@ export function StoryViewer({ queue, startIndex }: Props) {
         </GestureDetector>
 
         {!chromeHidden ? (
-          <Animated.View entering={FadeIn.duration(150)} exiting={FadeOut.duration(120)} style={[styles.top, { paddingTop: insets.top + 6 }]} pointerEvents="box-none">
+          <Animated.View entering={FadeIn.duration(150)} exiting={FadeOut.duration(120)} style={[styles.top, { paddingTop: fullscreenTop(insets) }]} pointerEvents="box-none">
             <View style={styles.segments}>
               {segments.map((seg, i) => (
                 <Segment key={seg.id} state={i < itemIdx ? 'done' : i === itemIdx ? 'active' : 'todo'} progress={progress} />

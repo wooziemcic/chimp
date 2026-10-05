@@ -14,6 +14,10 @@ export interface ChatApi {
   fetchMessages: typeof chat.fetchMessages;
   sendMessage: typeof chat.sendMessage;
   markRead: typeof chat.markRead;
+  /** Phase 8 (0011): Seen up to a message, Delivered after a sync, and the receipts to show. */
+  markReadUpto: typeof chat.markReadUpto;
+  markDelivered: typeof chat.markDelivered;
+  fetchReceipts: typeof chat.fetchReceipts;
   respondToRequest: typeof chat.respondToRequest;
   startConversation: typeof chat.startConversation;
   deleteMessage: typeof chat.deleteMessage;

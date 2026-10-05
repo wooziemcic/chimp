@@ -6,6 +6,7 @@ import { ActivityIndicator, AppState, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { AppReviewFrame } from '@/components/AppReviewBanner';
+import { DeviceInsetsProvider } from '@/components/system/SafeArea';
 import { AUTH_BG } from '@/components/auth/palette';
 import { MediaViewer } from '@/components/media/MediaViewer';
 import { NestedTabBar } from '@/components/TabBar';
@@ -26,7 +27,9 @@ import { useExposure } from '@/store/useExposure';
 import { ds } from '@/services/dataset';
 import { startAnalytics } from '@/services/analytics';
 import { ensurePushRegistered, installPushHandling, onPendingPush, pendingPush, takePendingPush } from '@/services/push';
+import { pushGate } from '@/services/pushRoutes';
 import { OfflineBanner } from '@/components/OfflineBanner';
+import { UnfinishedPostCard } from '@/components/create/UnfinishedPostCard';
 import { useSession } from '@/store/useSession';
 import { colors } from '@/theme';
 import { afterFirstPaint, startupMark } from '@/utils/startup';
@@ -145,13 +148,14 @@ export default function RootLayout() {
     const go = () => {
       const p = pendingPush();
       if (!p) return;
-      const s = useSession.getState();
-      if (s.mode !== 'real' || !s.uid || (p.for && p.for !== s.uid)) {
-        takePendingPush(); // meant for another account (or the Demo is open): ignore
+      // Phase 8: one pure rule (pushGate) — wrong account / Demo / stale → dropped;
+      // chat not bound to this account yet → wait (up to 6 s).
+      const gate = pushGate(p, useSession.getState(), useChat.getState().uid, Date.now(), Date.now() - started);
+      if (gate === 'drop') {
+        takePendingPush();
         return;
       }
-      // Wait (up to 6 s) for chat / After Dark to be bound to this account.
-      if (useChat.getState().uid !== s.uid && Date.now() - started < 6000) {
+      if (gate === 'wait') {
         timer = setTimeout(go, 250);
         return;
       }
@@ -196,6 +200,8 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.bg }}>
       <ThemeProvider value={navTheme}>
+        {/* Phase 8: the phone's real insets, for full-screen surfaces (outside the App Review frame). */}
+        <DeviceInsetsProvider>
         <AppReviewFrame active={reviewDemo && appReady}>
         <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.bg } }}>
           {/* Phase 6A gate: `/` routes by session status (see app/index.tsx). */}
@@ -242,6 +248,8 @@ export default function RootLayout() {
           <Stack.Screen name="create/buzz" options={{ presentation: 'modal' }} />
           <Stack.Screen name="create/drift" options={{ presentation: 'modal' }} />
           <Stack.Screen name="create/story" options={{ presentation: 'modal' }} />
+          {/* Posting reliability: record a short video without leaving Chimp. */}
+          <Stack.Screen name="create/record" options={{ presentation: 'fullScreenModal', animation: 'fade', contentStyle: { backgroundColor: '#000' } }} />
           <Stack.Screen name="create/world" options={{ presentation: 'modal' }} />
           {/* Phase 6D */}
           <Stack.Screen name="delete-account" options={{ presentation: 'modal' }} />
@@ -254,7 +262,10 @@ export default function RootLayout() {
         {appReady ? <MediaViewer /> : null}
         {/* Phase 7C: a quiet "Offline" pill (REAL only; never blocks anything). */}
         {appReady && mode === 'real' ? <OfflineBanner /> : null}
+        {/* Posting reliability: "You have an unfinished post" (this account's drafts only). */}
+        {appReady ? <UnfinishedPostCard /> : null}
         </AppReviewFrame>
+        </DeviceInsetsProvider>
       </ThemeProvider>
     </GestureHandlerRootView>
   );

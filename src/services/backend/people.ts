@@ -16,6 +16,7 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 import { backendError, kindOf } from './errors';
 import type { ProfileRow } from './mappers';
+import { topicSeq } from './realtimeTopic';
 
 const sb = () => supabase();
 
@@ -136,7 +137,7 @@ export async function markEventsSeen(): Promise<void> {
  */
 export function subscribeUserEvents(uid: string, onEvent: (e: UserEventRow) => void, onStatus: (status: string) => void): () => void {
   const channel: RealtimeChannel = sb()
-    .channel(`events:${uid}`)
+    .channel(`events:${uid}:${topicSeq()}`)
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'user_events', filter: `user_id=eq.${uid}` }, (p) => onEvent(p.new as UserEventRow))
     .subscribe((status) => onStatus(status));
   return () => {

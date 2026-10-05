@@ -15,9 +15,12 @@ import { repo } from '@/services/repository';
 import type { Board, BuzzItem, DriftItem, EntityRef, Move, Post, Story, Tip } from '@/types/models';
 import { EDITION } from './config';
 import { type GraphContext, first, scoreBoard, scoreMove, scoreStory } from './relevance';
-import { isNightRef, negativeFeedback, scoreBuzz, scoreDrift, scorePost, trendingScore } from './surfaces';
+import { ageHoursOf, buzzEngagement, createdMs, isNightRef, negativeFeedback, scoreBuzz, scoreDrift, scorePost, trendingScore } from './surfaces';
 import { freshCount } from './touch';
-import { pinFresh } from '@/utils/buzzRows';
+import { isToday, mostEngaged, newestFirst, todayFirst } from '@/utils/feedOrder';
+
+/** Board posts carry a "3h" / "2d" label (Demo fixtures): their creation time from it. */
+export const postCreatedMs = (p: Post, now = Date.now()) => now - ageHoursOf(p.createdAt) * 3_600_000;
 
 // ─── Topics ─────────────────────────────────────────────────────────────────
 
@@ -95,9 +98,23 @@ export type EditionModule = ModuleItems & {
   why?: string;
 };
 
+/** A World post in Today's "New today / Earlier" list (Buzz, a World photo/video, or a Board post). */
+export type TodayEntry =
+  | { key: string; type: 'buzz'; item: BuzzItem; boardId: string; createdMs: number; today: boolean }
+  | { key: string; type: 'drift'; item: DriftItem; boardId: string; createdMs: number; today: boolean }
+  | { key: string; type: 'post'; item: Post; boardId: string; createdMs: number; today: boolean };
+
 export interface Edition {
   board: Board;
   lead?: LeadItem;
+  /**
+   * Today's posts first (newest first), then older posts (newest first). The
+   * cover isn't repeated here. Separate from `modules`, so the graph's module
+   * order is unchanged.
+   */
+  latest: TodayEntry[];
+  /** The cover itself was created today. */
+  leadToday: boolean;
   modules: EditionModule[];
   topics: RankedTopic[];
   /** Everything counted in "N new today". */
@@ -164,7 +181,22 @@ export function buildEdition(ctx: GraphContext, boardId: string): Edition | unde
   if (news[0]) leadCandidates.push({ kind: 'news', item: news[0].item, score: news[0].score + EDITION.lead.news, why: news[0].reasons[0]?.text ?? '' });
   if (drift[0]) leadCandidates.push({ kind: 'drift', item: drift[0].item, score: drift[0].score + EDITION.lead.drift, why: drift[0].reasons[0]?.text ?? '' });
   if (leadPost) leadCandidates.push({ kind: 'post', item: leadPost.item, score: leadPost.score + EDITION.lead.post, why: leadPost.reasons[0]?.text ?? '' });
-  const lead = leadCandidates.sort(byScore)[0];
+  // A cover created today wins (the newest one); otherwise the graph's choice.
+  const nowMs = Date.now();
+  const todayCovers: LeadItem[] = [
+    ...news.filter((n) => isToday(createdMs(n.item, nowMs), nowMs)).map((n) => ({ kind: 'news' as const, item: n.item, score: n.score, why: n.reasons[0]?.text ?? '', at: createdMs(n.item, nowMs) })),
+    ...drift.filter((d) => isToday(createdMs(d.item, nowMs), nowMs)).map((d) => ({ kind: 'drift' as const, item: d.item, score: d.score, why: d.reasons[0]?.text ?? '', at: createdMs(d.item, nowMs) })),
+    ...posts.filter((p) => (p.item.images?.length || p.item.place) && isToday(postCreatedMs(p.item, nowMs), nowMs)).map((p) => ({ kind: 'post' as const, item: p.item, score: p.score, why: p.reasons[0]?.text ?? '', at: postCreatedMs(p.item, nowMs) })),
+  ]
+    .sort((a, b) => b.at - a.at)
+    .map(({ at: _at, ...l }) => l as LeadItem);
+  // Today's posts (any kind) come first on Today: if there are some but none can be
+  // the cover, there's no cover, so nothing older sits above them.
+  const anyToday =
+    buzz.some((b) => isToday(createdMs(b.item, nowMs), nowMs)) ||
+    drift.some((d) => isToday(createdMs(d.item, nowMs), nowMs)) ||
+    posts.some((p) => isToday(postCreatedMs(p.item, nowMs), nowMs));
+  const lead = todayCovers[0] ?? (anyToday ? undefined : leadCandidates.sort(byScore)[0]);
 
   // ── Your evidence inside this World (drives module order).
   const inWorld = <T extends { boardId: string }>(ids: string[], get: (id: string) => T | undefined) =>
@@ -222,8 +254,12 @@ export function buildEdition(ctx: GraphContext, boardId: string): Edition | unde
     .sort(byScore)
     .map((x) => x.item);
 
-  // Buzzing = what people are suddenly discussing: trending × relevance.
-  const buzzing = [...buzz]
+  // Buzzing = the World's most engaged posts: likes + comments, with a small
+  // recency boost (utils/feedOrder → engagementScore). Nothing pins here.
+  const byBuzzId = new Map(buzz.map((b) => [b.item.id, b.item]));
+  const buzzingItems = mostEngaged(buzz.map((b) => buzzEngagement(ctx, b.item, nowMs)), nowMs).map((e) => byBuzzId.get(e.id)!);
+  // The module's place in the edition still comes from the graph (relevance × heat), unchanged.
+  const heat = [...buzz]
     .map((b) => ({ ...b, heat: b.score + Math.log10(trendingScore(b.item.likeCount, b.item.ageHours) + 1) * EDITION.heatWeight }))
     .sort((a, b) => b.heat - a.heat);
 
@@ -234,9 +270,8 @@ export function buildEdition(ctx: GraphContext, boardId: string): Edition | unde
   const cap = (v: number) => Math.min(B.cap, v);
   const draft: EditionModule[] = [
     {
-      // Phase 6C: what you just posted here leads (newest first, 30 minutes), like For You.
-      id: 'buzzing', title: MODULE_TITLE.buzzing, items: pinFresh(buzzing.map((x) => x.item), (a) => repo.isMe(a), Date.now()).slice(0, 3),
-      base: W.buzzing, boost: cap(ev.buzzing * B.buzzing) + topScore(buzzing) * B.relevance, score: 0,
+      id: 'buzzing', title: MODULE_TITLE.buzzing, items: buzzingItems.slice(0, 3),
+      base: W.buzzing, boost: cap(ev.buzzing * B.buzzing) + topScore(heat) * B.relevance, score: 0,
       why: ev.buzzing ? 'You’ve been joining the conversation here' : undefined,
     },
     {
@@ -272,8 +307,21 @@ export function buildEdition(ctx: GraphContext, boardId: string): Edition | unde
     .map((m) => ({ ...m, boost: Math.round(m.boost * 10) / 10, score: Math.round((m.base + m.boost) * 10) / 10 }))
     .sort((a, b) => b.score - a.score) as EditionModule[];
 
+  // Today's posts first, newest first; older posts underneath, newest first.
+  const entries: TodayEntry[] = [
+    ...buzz.map(({ item: b }) => ({ key: `b:${b.id}`, type: 'buzz' as const, item: b, boardId, createdMs: createdMs(b, nowMs), today: false })),
+    ...drift.map(({ item: d }) => ({ key: `d:${d.id}`, type: 'drift' as const, item: d, boardId, createdMs: createdMs(d, nowMs), today: false })),
+    ...posts.map(({ item: p }) => ({ key: `p:${p.id}`, type: 'post' as const, item: p, boardId, createdMs: postCreatedMs(p, nowMs), today: false })),
+  ].filter((e) => e.item.id !== leadId);
+  const byKey = new Map(entries.map((e) => [e.key, e]));
+  const split = todayFirst(entries.map((e) => ({ id: e.key, createdMs: e.createdMs })), nowMs);
+  const latest: TodayEntry[] = [
+    ...split.today.map((t) => ({ ...byKey.get(t.id)!, today: true })),
+    ...split.earlier.map((t) => byKey.get(t.id)!),
+  ];
+
   const fresh = freshCount(s.changes, { kind: 'board', id: boardId });
-  const edition: Edition = { board, lead, modules, topics, freshCount: fresh };
+  const edition: Edition = { board, lead, latest, leadToday: !!todayCovers[0], modules, topics, freshCount: fresh };
   if (!editionCache.has(ctx)) editionCache.set(ctx, new Map());
   editionCache.get(ctx)!.set(boardId, edition);
   return edition;
@@ -313,36 +361,57 @@ export function buildExplore(ctx: GraphContext, boardId: string): ExploreEntry[]
   return out;
 }
 
-function worldStream(ctx: GraphContext, boardId: string, home: boolean): ExploreEntry[] {
+/** After this many posts, one other thing (a tip, Story or Move) — the posts keep their newest-first order. */
+const EXPLORE_EXTRA_EVERY = 5;
+
+/**
+ * One World's part of Explore (pre-TestFlight ordering update):
+ *   - its posts (Board posts, Buzz incl. news, World photos/videos) NEWEST
+ *     FIRST, created_at desc, so you scroll down into older posts;
+ *   - its tips, Stories and Moves (not posts) keep their graph order and are
+ *     slotted in after every 5 posts, never changing the posts' order;
+ *   - the photo grid after the 4th entry, as before.
+ */
+function worldStream(ctx: GraphContext, boardId: string, home: boolean, now = Date.now()): ExploreEntry[] {
   const { s } = ctx;
-  const neg = negativeFeedback(ctx);
   const w = repo.world(boardId);
-  const lanes: { score: number; e: ExploreEntry }[][] = [
-    w.posts.filter((p) => !s.blocked[p.authorId]).map((p) => ({ score: scorePost(ctx, p, neg).score, e: { key: `p:${p.id}`, type: 'post' as const, item: p, boardId } })),
-    [...w.buzz, ...w.news].filter((b) => !b.authorId || !s.blocked[b.authorId]).map((b) => ({ score: scoreBuzz(ctx, b, neg).score, e: { key: `b:${b.id}`, type: 'buzz' as const, item: b, boardId } })),
-    w.watch.filter((d) => !s.blocked[d.authorId]).map((d) => ({ score: scoreDrift(ctx, d, neg).score, e: { key: `d:${d.id}`, type: 'drift' as const, item: d, boardId } })),
-    home ? repo.tipsForBoard(boardId).map((t) => ({ score: 34 + Math.log10(t.helpful + 1) * 3, e: { key: `t:${t.id}`, type: 'tip' as const, item: t, boardId } })) : [],
-    w.stories.filter((st) => !isNightRef({ kind: 'story', id: st.id })).map((st) => ({ score: scoreStory(ctx, st).score - 5, e: { key: `s:${st.id}`, type: 'story' as const, item: st, boardId } })),
-    w.moves.filter((m) => !isNightRef({ kind: 'move', id: m.id })).map((m) => ({ score: scoreMove(ctx, m).score - 5, e: { key: `m:${m.id}`, type: 'move' as const, item: m, boardId } })),
-  ].map((lane) => lane.sort((a, b) => b.score - a.score));
+  type PostEntry = Extract<ExploreEntry, { type: 'post' | 'buzz' | 'drift' }> & { createdMs: number };
+  const postEntries: PostEntry[] = [
+    ...w.posts.filter((p) => !s.blocked[p.authorId]).map((p) => ({ key: `p:${p.id}`, type: 'post' as const, item: p, boardId, createdMs: postCreatedMs(p, now) })),
+    ...[...w.buzz, ...w.news].filter((b) => !b.authorId || !s.blocked[b.authorId]).map((b) => ({ key: `b:${b.id}`, type: 'buzz' as const, item: b, boardId, createdMs: createdMs(b, now) })),
+    ...w.watch.filter((d) => !s.blocked[d.authorId]).map((d) => ({ key: `d:${d.id}`, type: 'drift' as const, item: d, boardId, createdMs: createdMs(d, now) })),
+  ];
+  const byKey = new Map(postEntries.map((e) => [e.key, e]));
+  const newest: ExploreEntry[] = newestFirst(postEntries.map((e) => ({ id: e.key, createdMs: e.createdMs }))).map((t) => {
+    const { createdMs: _c, ...e } = byKey.get(t.id)!;
+    return e;
+  });
+  const extras: ExploreEntry[] = [
+    ...(home ? repo.tipsForBoard(boardId).map((t) => ({ score: 34 + Math.log10(t.helpful + 1) * 3, e: { key: `t:${t.id}`, type: 'tip' as const, item: t, boardId } })) : []),
+    ...w.stories.filter((st) => !isNightRef({ kind: 'story', id: st.id })).map((st) => ({ score: scoreStory(ctx, st).score - 5, e: { key: `s:${st.id}`, type: 'story' as const, item: st, boardId } })),
+    ...w.moves.filter((m) => !isNightRef({ kind: 'move', id: m.id })).map((m) => ({ score: scoreMove(ctx, m).score - 5, e: { key: `m:${m.id}`, type: 'move' as const, item: m, boardId } })),
+  ]
+    .sort((a, b) => b.score - a.score)
+    .map((x) => x.e);
 
   const photos = [
     ...repo.albumsForBoard(boardId).flatMap((a) => a.images),
     ...w.posts.flatMap((p) => p.images ?? []),
   ];
-  // Interleave: take the best head across lanes, but never the same type twice in a row.
   const merged: ExploreEntry[] = [];
-  let lastType = '';
-  while (lanes.some((l) => l.length)) {
-    const candidates = lanes.filter((l) => l.length).sort((a, b) => b[0].score - a[0].score);
-    const pick = candidates.find((l) => l[0].e.type !== lastType) ?? candidates[0];
-    const next = pick.shift()!;
-    merged.push(next.e);
-    lastType = next.e.type;
-    if (merged.length === 4 && photos.length >= 3) {
-      merged.push({ key: `ph:${boardId}`, type: 'photos', images: photos.slice(0, 6), title: `Photos from ${repo.board(boardId)?.title}`, boardId });
-      lastType = 'photos';
+  let sincePost = 0;
+  const push = (e: ExploreEntry) => {
+    merged.push(e);
+    if (merged.length === 4 && photos.length >= 3) merged.push({ key: `ph:${boardId}`, type: 'photos', images: photos.slice(0, 6), title: `Photos from ${repo.board(boardId)?.title}`, boardId });
+  };
+  for (const e of newest) {
+    push(e);
+    sincePost += 1;
+    if (sincePost >= EXPLORE_EXTRA_EVERY && extras.length) {
+      push(extras.shift()!);
+      sincePost = 0;
     }
   }
+  for (const e of extras) push(e);
   return merged;
 }

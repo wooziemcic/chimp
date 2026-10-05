@@ -1,7 +1,7 @@
 import { router } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { ArrowRight, Flame, Lightbulb, Newspaper, Play, Sparkles, TrendingUp } from 'lucide-react-native';
-import { memo } from 'react';
+import { memo, useState } from 'react';
 import { FlatList, StyleSheet, useWindowDimensions, View } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
 
@@ -13,7 +13,7 @@ import { Avatar } from '@/components/ui/Avatar';
 import { Img } from '@/components/ui/Img';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import type { Edition, EditionModule, ExploreEntry, LeadItem } from '@/graph/worlds';
+import type { Edition, EditionModule, ExploreEntry, LeadItem, TodayEntry } from '@/graph/worlds';
 import { repo } from '@/services/repository';
 import { colors, radius, shadow } from '@/theme';
 import type { BoardTheme, Post } from '@/types/models';
@@ -31,7 +31,7 @@ export const TodayEdition = memo(function TodayEdition({ edition, theme, onExplo
   // module. "From your people" (membership lines like "Mira is a member") and
   // "Trending" (nearby topics and Worlds) aren't today's activity, so on their
   // own they don't count and aren't shown.
-  const empty = !lead && modules.every((m) => m.id === 'people' || m.id === 'trending');
+  const empty = !lead && !edition.latest.length && modules.every((m) => m.id === 'people' || m.id === 'trending');
   return (
     <Animated.View entering={FadeIn.duration(250)}>
       {/* Masthead */}
@@ -43,7 +43,7 @@ export const TodayEdition = memo(function TodayEdition({ edition, theme, onExplo
           {`The ${board.title} edition`}
         </T>
         <T v="footnote" color={theme.mutedText} weight="500" style={{ marginTop: 2 }}>
-          {`${edition.freshCount ? `${edition.freshCount} new since your last visit · ` : ''}Ordered by what you’re into`}
+          {`${edition.freshCount ? `${edition.freshCount} new since your last visit · ` : ''}Today’s posts first`}
         </T>
         {topics.length ? (
           <View style={styles.topicRow}>
@@ -65,6 +65,8 @@ export const TodayEdition = memo(function TodayEdition({ edition, theme, onExplo
       </View>
 
       {lead ? <Cover lead={lead} theme={theme} /> : null}
+
+      {edition.latest.length ? <LatestPosts entries={edition.latest} leadToday={edition.leadToday} theme={theme} /> : null}
 
       {empty
         ? null
@@ -108,6 +110,77 @@ export const TodayEdition = memo(function TodayEdition({ edition, theme, onExplo
     </Animated.View>
   );
 });
+
+const TODAY_PAGE = 10;
+const EARLIER_FIRST = 3;
+const EARLIER_PAGE = 10;
+
+/**
+ * Today's posts first (newest first), then "Earlier" underneath (newest
+ * first). The order is fixed when the edition is built; "Show more" only
+ * reveals the next ones in that same order.
+ */
+function LatestPosts({ entries, leadToday, theme }: { entries: TodayEntry[]; leadToday: boolean; theme: BoardTheme }) {
+  const { width } = useWindowDimensions();
+  const w = width - 32;
+  const today = entries.filter((e) => e.today);
+  const earlier = entries.filter((e) => !e.today);
+  const [todayCount, setTodayCount] = useState(TODAY_PAGE);
+  // "Show older posts" adds to a base that follows whether there's anything new today.
+  const [earlierMore, setEarlierMore] = useState(0);
+  const earlierCount = (today.length ? EARLIER_FIRST : EARLIER_FIRST * 2) + earlierMore;
+  return (
+    <View style={styles.module} testID="today-latest">
+      {/* The cover is today's newest post: no "nothing new" line under it. */}
+      {!today.length && leadToday ? null : (
+      <View style={styles.modHead}>
+        <View style={[styles.rule, { backgroundColor: theme.text }]} />
+        <T v="caption" weight="800" color={theme.text} style={{ letterSpacing: 1.3, marginTop: 8 }}>
+          {today.length ? `NEW TODAY · ${today.length}` : 'NEW TODAY'}
+        </T>
+        {today.length ? null : (
+          <T v="footnote" color={theme.mutedText} style={{ marginTop: 2 }} testID="today-none">
+            Nothing new today yet.
+          </T>
+        )}
+      </View>
+      )}
+      {today.length ? (
+        <View style={{ paddingHorizontal: 16, gap: 12 }}>
+          {today.slice(0, todayCount).map((e) => (
+            <ExploreItem key={e.key} e={e} w={w} theme={theme} />
+          ))}
+          {todayCount < today.length ? <MoreButton theme={theme} label={`Show more from today (${today.length - todayCount})`} onPress={() => setTodayCount((c) => c + TODAY_PAGE)} /> : null}
+        </View>
+      ) : null}
+      {earlier.length ? (
+        <>
+          <View style={[styles.modHead, { marginTop: today.length ? 22 : leadToday ? 0 : 8 }]}>
+            <T v="caption" weight="800" color={theme.mutedText} style={{ letterSpacing: 1.3 }}>
+              EARLIER
+            </T>
+          </View>
+          <View style={{ paddingHorizontal: 16, gap: 12 }} testID="today-earlier">
+            {earlier.slice(0, earlierCount).map((e) => (
+              <ExploreItem key={e.key} e={e} w={w} theme={theme} />
+            ))}
+            {earlierCount < earlier.length ? <MoreButton theme={theme} label="Show older posts" onPress={() => setEarlierMore((c) => c + EARLIER_PAGE)} /> : null}
+          </View>
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+function MoreButton({ theme, label, onPress }: { theme: BoardTheme; label: string; onPress: () => void }) {
+  return (
+    <Tap onPress={onPress} style={[styles.more, { borderColor: theme.line }]} accessibilityLabel={label}>
+      <T v="subhead" weight="700" color={theme.primary}>
+        {label}
+      </T>
+    </Tap>
+  );
+}
 
 function leadHref(lead: LeadItem) {
   if (lead.kind === 'news') return hrefFor({ kind: 'buzz', id: lead.item.id });
@@ -343,7 +416,7 @@ export const ExploreStream = memo(function ExploreStream({ entries, count, theme
   return (
     <Animated.View entering={FadeIn.duration(250)} style={{ paddingHorizontal: 16, gap: 12 }}>
       <T v="footnote" color={theme.mutedText} weight="500" style={{ marginBottom: 2 }}>
-        Everything in this World, then the Worlds around it. Scroll as long as you like.
+        Newest first: everything in this World, then the Worlds around it. Scroll as long as you like.
       </T>
       {shown.map((e) => (
         <ExploreItem key={e.key} e={e} w={w} theme={theme} />

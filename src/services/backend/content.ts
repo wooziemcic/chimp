@@ -25,7 +25,7 @@ import {
   toUser,
 } from './mappers';
 import type { DatasetParts } from '../dataset';
-import type { UploadedMedia, UploadedVideo } from './media';
+import { DB_TIMEOUT_MS, type UploadedMedia, type UploadedVideo, UploadStalledError, timeoutSignal } from './media';
 
 const sb = () => supabase();
 
@@ -409,32 +409,66 @@ export async function createBuzz(uid: string, input: NewBuzz, media: (UploadedMe
       poll,
       media_ids: media.map((m) => m.id),
     })
-    .select('*')
-    .single();
-  let res = await insert;
-  if (res.error?.code === '23505' && input.clientId) res = await sb().from('buzz_items').select('*').eq('id', input.clientId).single();
+    .select('*');
+  let res = await withDbTimeout((signal) => insert.abortSignal(signal).single());
+  if (res.error?.code === '23505' && input.clientId) res = await withDbTimeout((signal) => sb().from('buzz_items').select('*').eq('id', input.clientId!).abortSignal(signal).single());
   const row = must(res, 'Posting to Buzz') as BuzzRow;
   const videos = Object.fromEntries(media.filter((m): m is UploadedVideo => 'bytes' in m && m.mimeType.startsWith('video/')).map((m) => [m.id, { poster: m.posterUrl, durationMs: m.durationMs }]));
   return toBuzz(row, Object.fromEntries(media.map((m) => [m.id, m.url])), Object.fromEntries(media.filter((m) => m.width && m.height).map((m) => [m.id, m.width / m.height])), videos);
 }
 
-export async function createDrift(uid: string, boardId: string, caption: string, media: UploadedMedia[]): Promise<DriftItem> {
-  const row = must(
-    await sb()
+export async function createDrift(uid: string, boardId: string, caption: string, media: UploadedMedia[], clientId?: string): Promise<DriftItem> {
+  // Posting reliability: a client-chosen id makes a retried post idempotent (as Buzz since 6C).
+  let res = await withDbTimeout((signal) =>
+    sb()
       .from('drift_items')
-      .insert({ author_id: uid, board_id: boardId, kind: media.length > 1 ? 'carousel' : 'photo', caption: caption.trim() || null, media_ids: media.map((m) => m.id) })
+      .insert({ ...(clientId ? { id: clientId } : {}), author_id: uid, board_id: boardId, kind: media.length > 1 ? 'carousel' : 'photo', caption: caption.trim() || null, media_ids: media.map((m) => m.id) })
       .select('*')
+      .abortSignal(signal)
       .single(),
-    'Posting to Drift',
-  ) as DriftRow;
+  );
+  if (res.error?.code === '23505' && clientId) res = await withDbTimeout((signal) => sb().from('drift_items').select('*').eq('id', clientId).abortSignal(signal).single());
+  const row = must(res, 'Posting to Drift') as DriftRow;
   return toDrift(row, Object.fromEntries(media.map((m) => [m.id, m.url])));
 }
 
-export async function createStoryItem(uid: string, boardId: string | null, caption: string, media: UploadedMedia): Promise<StoryRow> {
-  return must(
-    await sb().from('story_items').insert({ author_id: uid, board_id: boardId, media_id: media.id, caption: caption.trim() || null }).select('*').single(),
-    'Posting your Story',
-  ) as StoryRow;
+export async function createStoryItem(uid: string, boardId: string | null, caption: string, media: UploadedMedia, clientId?: string): Promise<StoryRow> {
+  let res = await withDbTimeout((signal) =>
+    sb()
+      .from('story_items')
+      .insert({ ...(clientId ? { id: clientId } : {}), author_id: uid, board_id: boardId, media_id: media.id, caption: caption.trim() || null })
+      .select('*')
+      .abortSignal(signal)
+      .single(),
+  );
+  if (res.error?.code === '23505' && clientId) res = await withDbTimeout((signal) => sb().from('story_items').select('*').eq('id', clientId).abortSignal(signal).single());
+  return must(res, 'Posting your Story') as StoryRow;
+}
+
+/**
+ * Posting reliability: a post insert that hasn't answered in DB_TIMEOUT_MS is
+ * treated as failed (the retry is idempotent: same id → it's found if it did land).
+ */
+async function withDbTimeout<T extends { data: unknown; error: { message: string; code?: string } | null }>(run: (signal: AbortSignal) => PromiseLike<T>): Promise<T> {
+  const t = timeoutSignal(DB_TIMEOUT_MS);
+  try {
+    const res = await run(t.signal);
+    if (res.error && t.signal.aborted) throw new UploadStalledError();
+    return res;
+  } finally {
+    t.clear();
+  }
+}
+
+/** Posting reliability: does the post with this client id already exist (a lost response)? null = couldn't tell. */
+export async function postExists(table: 'buzz_items' | 'drift_items' | 'story_items', id: string): Promise<boolean | null> {
+  try {
+    const res = await withDbTimeout((signal) => sb().from(table).select('id').eq('id', id).abortSignal(signal).maybeSingle());
+    if (res.error) return null;
+    return !!res.data;
+  } catch {
+    return null; // timed out: couldn't tell
+  }
 }
 
 export interface NewWorld {

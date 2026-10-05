@@ -62,3 +62,32 @@ export function routeForPush(data: PushData): PushTarget | null {
 export function conversationOf(data: PushData): string | null {
   return data && typeof data === 'object' ? id(data.conversation_id) : null;
 }
+
+/**
+ * Phase 8: what to do with a tapped notification right now. Pure (unit-tested).
+ *   wait  the app isn't ready for it yet (session restoring, switching,
+ *         onboarding, signed out, or chat not yet bound to this account)
+ *   drop  it can't be for what's on screen: the Demo is open, it was meant for
+ *         another account, or it's older than PUSH_HOLD_MS (a tap from long ago
+ *         must not yank you somewhere when you finally sign in)
+ *   go    open its (already validated) route
+ */
+export type PushGate = 'go' | 'wait' | 'drop';
+export const PUSH_HOLD_MS = 10 * 60 * 1000;
+export const PUSH_CHAT_WAIT_MS = 6000;
+
+export function pushGate(
+  p: { for: string | null; at: number },
+  session: { status: string; mode: string | null; uid?: string | null },
+  chatUid: string | null | undefined,
+  now: number,
+  waitedMs: number,
+): PushGate {
+  if (now - p.at > PUSH_HOLD_MS) return 'drop';
+  if (session.status !== 'ready') return 'wait';
+  if (session.mode !== 'real') return 'drop';
+  if (!session.uid) return 'wait';
+  if (p.for && p.for !== session.uid) return 'drop';
+  if (chatUid !== session.uid && waitedMs < PUSH_CHAT_WAIT_MS) return 'wait';
+  return 'go';
+}

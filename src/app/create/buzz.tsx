@@ -1,17 +1,19 @@
 import { useLocalSearchParams } from 'expo-router';
-import { BarChart3, Camera, Film, Globe2, ImageIcon, Plus, X } from 'lucide-react-native';
-import { useEffect, useRef, useState } from 'react';
+import { BarChart3, Camera, Film, Globe2, ImageIcon, Plus, Video, X } from 'lucide-react-native';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { StyleSheet, TextInput, View } from 'react-native';
 
-import { Composer, Input, PhotoPicker, WorldPicker, closeComposer } from '@/components/create/CreateParts';
+import { Composer, Input, PhotoPicker, WorldPicker } from '@/components/create/CreateParts';
+import { PhotosCopyNote, PostStatus } from '@/components/create/PostStatus';
+import { useDraftComposer } from '@/components/create/useDraftComposer';
 import { Avatar } from '@/components/ui/Avatar';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { useMyAvatar } from '@/hooks/useGraph';
 import { VideoPoster, formatDuration } from '@/components/media/ChimpVideo';
-import { type PickedImage, type PickedVideo, type UploadProgress, makePoster, pickImages, pickVideo, videoProblem } from '@/services/backend/media';
-import { abandonPostJob, newPostJob, postBuzz } from '@/services/create';
+import { makePoster, pickImages, pickVideo, videoProblem } from '@/services/backend/media';
 import { repo } from '@/services/repository';
+import { progressText } from '@/utils/postDraft';
 import { colors, radius } from '@/theme';
 
 const LIMIT = { post: 500, text: 2000, question: 140, option: 60, photos: 4 };
@@ -26,29 +28,31 @@ export default function NewBuzz() {
   const params = useLocalSearchParams<{ board?: string; kind?: string; pick?: string }>();
   const me = repo.me();
   const avatar = useMyAvatar();
-  const [body, setBody] = useState('');
-  const [images, setImages] = useState<PickedImage[]>([]);
-  const [video, setVideo] = useState<PickedVideo | null>(null);
-  const [progress, setProgress] = useState<UploadProgress | null>(null);
-  // One post attempt, kept across retries: finished uploads are reused and the post keeps its id.
-  const job = useRef(newPostJob());
-  const [poll, setPoll] = useState(params.kind === 'poll');
-  const [options, setOptions] = useState(['', '']);
-  const [boardId, setBoardId] = useState<string | null>(params.board && repo.board(params.board) ? params.board : null);
+  const initialBoard = params.board && repo.board(params.board) ? params.board : null;
+  // Posting reliability: one durable draft per composer (kept across retries and restarts).
+  const c = useDraftComposer('buzz', '/buzz', { boardId: initialBoard });
+  const [body, setBody] = useState(c.resumed?.body ?? '');
+  const [poll, setPoll] = useState(c.resumed ? !!c.resumed.poll : params.kind === 'poll');
+  const [options, setOptions] = useState(c.resumed?.poll?.options ?? ['', '']);
+  const [boardId, setBoardId] = useState<string | null>(c.resumed ? c.resumed.boardId : initialBoard);
   const [showWorlds, setShowWorlds] = useState(!!boardId);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<TextInput>(null);
 
+  const images = c.media.filter((m) => m.kind === 'image');
+  const video = c.media.find((m) => m.kind === 'video') ?? null;
+  const busy = c.posting;
   const text = body.trim();
   const filledOptions = options.map((o) => o.trim()).filter(Boolean);
   const valid = poll ? text.length > 0 && text.length <= LIMIT.question && filledOptions.length >= 2 : text.length > 0 || images.length > 0 || !!video;
   const max = poll ? LIMIT.question : LIMIT.text;
+  const content = () => ({ body: poll ? text : body, boardId, poll: poll ? { question: text, options: filledOptions } : null });
 
   const pick = async (source: 'camera' | 'library') => {
+    setError(null);
     try {
       const got = await pickImages({ source, multiple: source === 'library', limit: LIMIT.photos - images.length });
-      setImages((cur) => [...cur, ...got].slice(0, LIMIT.photos));
+      await c.add(content(), got.slice(0, LIMIT.photos - images.length).map((image) => ({ image })));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -61,64 +65,55 @@ export default function NewBuzz() {
       if (!v) return;
       const problem = videoProblem(v);
       if (problem) return setError(problem);
-      setImages([]);
-      setVideo(v);
       // The poster frame (iPhone) shows in the preview and is reused for the upload.
       const poster = await makePoster(v);
-      if (poster) setVideo((cur) => (cur && cur.uri === v.uri ? { ...cur, poster } : cur));
+      await c.add(content(), [{ video: poster ? { ...v, poster } : v }], { replace: true });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  // "Add video" on a World opens straight into the camera roll.
-  const autoPick = useRef(params.pick === 'video');
+  // "Add video" on a World opens straight into the camera roll ("Record video" into the recorder).
+  const onOpen = useEffectEvent(() => {
+    if (params.pick === 'video') void chooseVideo();
+    if (params.pick === 'record') c.openRecorder(content());
+  });
   useEffect(() => {
-    if (!autoPick.current) return;
-    autoPick.current = false;
-    void chooseVideo();
+    const t = setTimeout(onOpen, 0);
+    return () => clearTimeout(t);
   }, []);
 
-  // Leaving mid-upload cancels it; leaving after a failed attempt removes anything that
-  // uploaded but never became a post.
-  const cancel = useRef(new AbortController());
-  useEffect(() => {
-    const current = job.current;
-    const controller = cancel.current;
-    return () => {
-      controller.abort();
-      void abandonPostJob(current);
-    };
-  }, []);
-
-  const post = async () => {
+  const post = () => {
     if (!valid || busy) return;
-    setBusy(true);
     setError(null);
-    try {
-      const kind = poll ? 'poll' : video ? 'video' : images.length ? 'photo' : text.length > LIMIT.post ? 'note' : 'post';
-      await postBuzz(
-        {
-          kind,
-          boardId,
-          body: poll ? undefined : text,
-          poll: poll ? { question: text, options: filledOptions } : undefined,
-        },
-        poll || video ? [] : images,
-        { video: poll ? null : video, job: job.current, onProgress: setProgress, signal: cancel.current.signal },
-      );
-      closeComposer('/buzz');
-    } catch (e) {
-      // Nothing is posted: your words, photos and clip stay here; Post retries (reusing finished uploads).
-      setError(`${e instanceof Error ? e.message : String(e)} Tap Post to try again.`);
-      setProgress(null);
-      setBusy(false);
-    }
+    void c.post(content());
   };
 
   const world = boardId ? repo.board(boardId) : undefined;
   return (
-    <Composer title="New Buzz" action="Post" onAction={post} disabled={!valid} busy={busy} error={error}>
+    <Composer
+      title="New Buzz"
+      action={c.failed ? 'Try again' : 'Post'}
+      onAction={post}
+      disabled={!valid}
+      busy={busy}
+      error={error}
+      onCancel={c.cancel}
+      cancelLabel={busy ? 'Stop' : 'Cancel'}
+      status={
+        <PostStatus
+          progress={c.progress}
+          posting={busy}
+          failed={c.failed}
+          cancelling={c.cancelling}
+          atRisk={c.atRisk}
+          onRetry={post}
+          onKeep={() => c.keep(content())}
+          onDiscard={() => void c.discard()}
+          onBack={() => c.setCancelling(false)}
+        />
+      }
+    >
       <View style={{ flexDirection: 'row' }}>
         <Avatar uri={avatar ?? me.avatar} name={me.displayName} size={40} />
         <View style={{ flex: 1, marginLeft: 10 }}>
@@ -150,16 +145,11 @@ export default function NewBuzz() {
               {`Video${video.durationMs ? ` · ${formatDuration(video.durationMs)}` : ''}`}
             </T>
             <T v="caption" color={colors.inkMuted} style={{ marginTop: 2 }}>
-              {progressLabel(progress, busy)}
+              {busy ? progressText(c.progress) || 'Preparing…' : video.captured ? 'Recorded in Chimp · up to 60 seconds' : 'Up to 60 seconds. Plays in Buzz and Drift.'}
             </T>
-            {progress?.stage === 'uploading' && progress.fraction !== undefined ? (
-              <View style={styles.bar}>
-                <View style={[styles.barFill, { width: `${Math.round(progress.fraction * 100)}%` }]} />
-              </View>
-            ) : null}
           </View>
           {!busy ? (
-            <Tap onPress={() => setVideo(null)} style={styles.removeOpt} accessibilityLabel="Remove video">
+            <Tap onPress={() => c.removeMedia(video.key)} style={styles.removeOpt} accessibilityLabel="Remove video">
               <X size={18} color={colors.inkMuted} />
             </Tap>
           ) : null}
@@ -168,9 +158,10 @@ export default function NewBuzz() {
 
       {!poll && images.length ? (
         <View style={{ marginTop: 12 }}>
-          <PhotoPicker images={images} onPick={pick} onRemove={(i) => setImages((cur) => cur.filter((_, k) => k !== i))} max={images.length} />
+          <PhotoPicker images={images} onPick={pick} onRemove={(i) => images[i] && c.removeMedia(images[i].key)} max={images.length} />
         </View>
       ) : null}
+      {!poll ? <PhotosCopyNote media={c.media} /> : null}
 
       {poll ? (
         <View style={styles.pollBox}>
@@ -203,6 +194,7 @@ export default function NewBuzz() {
           <>
             <Tool icon={<Camera size={18} color={colors.accent} />} label="Camera" onPress={() => pick('camera')} disabled={busy || !!video || images.length >= LIMIT.photos} />
             <Tool icon={<ImageIcon size={18} color={colors.accent} />} label="Photos" onPress={() => pick('library')} disabled={busy || !!video || images.length >= LIMIT.photos} />
+            <Tool icon={<Video size={18} color={colors.accent} />} label="Record" onPress={() => c.openRecorder(content())} disabled={busy || images.length > 0 || !!video} />
             <Tool icon={<Film size={18} color={colors.accent} />} label="Video" onPress={() => void chooseVideo()} disabled={busy || images.length > 0 || !!video} />
           </>
         ) : null}
@@ -212,10 +204,7 @@ export default function NewBuzz() {
           on={poll}
           onPress={() => {
             setPoll((p) => !p);
-            if (!poll) {
-              setImages([]);
-              setVideo(null);
-            }
+            if (!poll) c.replaceMedia([]);
           }}
         />
         <Tool icon={<Globe2 size={18} color={world ? colors.white : colors.accent} />} label={world ? world.title : 'World'} on={!!world} onPress={() => setShowWorlds((v) => !v)} />
@@ -232,13 +221,6 @@ export default function NewBuzz() {
       )}
     </Composer>
   );
-}
-
-function progressLabel(p: UploadProgress | null, busy: boolean): string {
-  if (!busy || !p) return 'Up to 60 seconds. Plays in Buzz and Drift.';
-  if (p.stage === 'preparing') return 'Preparing…';
-  if (p.stage === 'uploading') return p.fraction !== undefined ? `Uploading… ${Math.round(p.fraction * 100)}%` : 'Uploading…';
-  return 'Posting…';
 }
 
 function Tool({ icon, label, onPress, on, disabled }: { icon: React.ReactNode; label: string; onPress: () => void; on?: boolean; disabled?: boolean }) {
@@ -260,6 +242,4 @@ const styles = StyleSheet.create({
   tool: { flexDirection: 'row', alignItems: 'center', height: 38, paddingHorizontal: 12, borderRadius: 19, backgroundColor: colors.accentSoft },
   toolOn: { backgroundColor: colors.accent },
   videoBox: { flexDirection: 'row', alignItems: 'center', marginTop: 12, padding: 10, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted, overflow: 'hidden' },
-  bar: { height: 4, borderRadius: 2, marginTop: 8, backgroundColor: colors.line, overflow: 'hidden' },
-  barFill: { height: 4, backgroundColor: colors.accent },
 });

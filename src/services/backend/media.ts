@@ -25,6 +25,9 @@ export interface PickedImage {
   width: number;
   height: number;
   mimeType?: string;
+  /** Posting reliability: taken with Chimp's camera (not already in the Photos library). */
+  captured?: boolean;
+  fileSize?: number;
 }
 
 export interface UploadedMedia {
@@ -45,18 +48,26 @@ export async function pickImages(opts: { source: 'camera' | 'library'; multiple?
   if (opts.source === 'camera') {
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) throw new Error('Camera access is off. You can turn it on in Settings.');
-    const res = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.9, allowsEditing: !!opts.square, aspect: opts.square ? [4, 5] : undefined });
-    return res.canceled ? [] : res.assets.map((a) => ({ uri: a.uri, width: a.width, height: a.height, mimeType: a.mimeType ?? undefined }));
+    // Kept at high quality: this file is the only copy of the moment until it's
+    // in Photos (see services/capture.ts). The upload copy is resized separately.
+    const res = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.92, allowsEditing: !!opts.square, aspect: opts.square ? [4, 5] : undefined });
+    return res.canceled ? [] : res.assets.map((a) => ({ uri: a.uri, width: a.width, height: a.height, mimeType: a.mimeType ?? undefined, fileSize: a.fileSize ?? undefined, captured: true }));
   }
   const res = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ['images'],
-    quality: 0.9,
+    // Posting reliability: quality 1 + the photo's CURRENT representation lets iOS
+    // hand over the original file as-is (the picker's fast path). With 0.9 it
+    // decoded every 24–48 MP HEIC to full size and re-encoded it as a full-size
+    // JPEG before Chimp resized it again — seconds per photo and a memory spike
+    // that could get the app killed. prepareImage() does the one resize.
+    quality: 1,
+    preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Current,
     allowsMultipleSelection: !!opts.multiple,
     selectionLimit: opts.multiple ? opts.limit ?? 6 : 1,
     allowsEditing: !opts.multiple && !!opts.square,
     aspect: opts.square ? [4, 5] : undefined,
   });
-  return res.canceled ? [] : res.assets.map((a) => ({ uri: a.uri, width: a.width, height: a.height, mimeType: a.mimeType ?? undefined }));
+  return res.canceled ? [] : res.assets.map((a) => ({ uri: a.uri, width: a.width, height: a.height, mimeType: a.mimeType ?? undefined, fileSize: a.fileSize ?? undefined }));
 }
 
 /** Resize so the long edge is ≤ maxEdge, re-encode as JPEG. */
@@ -70,6 +81,97 @@ export async function prepareImage(img: PickedImage, maxEdge: number): Promise<P
   const rendered = await ctx.renderAsync();
   const out = await rendered.saveAsync({ format: SaveFormat.JPEG, compress: 0.8 });
   return { uri: out.uri, width: out.width, height: out.height, mimeType: 'image/jpeg' };
+}
+
+// ─── Posting reliability: timeouts, idempotent paths ────────────────────────
+
+/** No progress for this long during an upload = stalled (cancel and say so). */
+export const STALL_MS = 30_000;
+/** A database write that hasn't answered in this long has failed (it is retried idempotently). */
+export const DB_TIMEOUT_MS = 20_000;
+
+export class UploadStalledError extends Error {
+  constructor() {
+    super('The connection stopped responding. Check your signal and try again.');
+    this.name = 'UploadStalledError';
+  }
+}
+
+/** An AbortSignal that fires after `ms` (or when `parent` aborts). */
+export function timeoutSignal(ms: number, parent?: AbortSignal): { signal: AbortSignal; clear: () => void } {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  const onParent = () => c.abort();
+  parent?.addEventListener('abort', onParent);
+  return {
+    signal: c.signal,
+    clear: () => {
+      clearTimeout(t);
+      parent?.removeEventListener('abort', onParent);
+    },
+  };
+}
+
+/** Resolve/reject with `p`, or reject after `ms` (the work itself may finish later; callers are idempotent). */
+export function withTimeout<T>(p: Promise<T>, ms: number, error: () => Error = () => new UploadStalledError()): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(error()), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** Storage said the object already exists: an earlier attempt of THIS post uploaded it. */
+const alreadyExists = (msg: string, status?: number) => status === 409 || /already exists|duplicate/i.test(msg);
+
+/** Insert a media row; if this path already has one (an earlier attempt), return that row's id. */
+async function recordMedia(row: Record<string, unknown> & { storage_path: string }, signal?: AbortSignal): Promise<string> {
+  const sb = supabase();
+  const t = timeoutSignal(DB_TIMEOUT_MS, signal);
+  try {
+    const ins = await sb.from('media').insert(row).select('id').abortSignal(t.signal).single();
+    if (!ins.error) return ins.data.id as string;
+    if (ins.error.code === '23505') {
+      const found = await sb.from('media').select('id').eq('storage_path', row.storage_path).abortSignal(t.signal).maybeSingle();
+      if (found.data?.id) return found.data.id as string;
+    }
+    if (t.signal.aborted && !signal?.aborted) throw new UploadStalledError();
+    throw new Error(`Couldn’t save media: ${ins.error.message}`);
+  } finally {
+    t.clear();
+  }
+}
+
+/**
+ * Is a file already at this (public) path? Native only — a cheap HEAD request
+ * that saves re-sending, e.g., a 50 MB clip that arrived before the app was
+ * killed. Any doubt (offline, timeout) = no.
+ */
+async function alreadyUploaded(path: string): Promise<boolean> {
+  if (Platform.OS === 'web') return false;
+  const t = timeoutSignal(8000);
+  try {
+    const res = await fetch(mediaUrl(path), { method: 'HEAD', signal: t.signal });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    t.clear();
+  }
+}
+
+/** Where a post's file goes. With a `name` (a draft's media key) the path is stable, so a retry finds what already uploaded. */
+export function mediaPath(userId: string, folder: MediaFolder, ext: string, name?: string): string {
+  const scope = folder.startsWith('boards/') ? folder : `${folder}/${userId}`;
+  return `${scope}/${name ?? rid()}.${ext}`;
 }
 
 async function readBytes(uri: string): Promise<ArrayBuffer> {
@@ -92,26 +194,44 @@ const rid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(
  * uploads but the row can't be saved, the file is removed again, so a
  * failure never leaves an orphan in Storage.
  */
-export async function uploadImage(userId: string, folder: MediaFolder, img: PickedImage): Promise<UploadedMedia> {
+export async function uploadImage(
+  userId: string,
+  folder: MediaFolder,
+  img: PickedImage,
+  opts: {
+    /** Posting reliability: a stable file name (draft media key) → a retry never uploads it twice. */
+    name?: string;
+    /** Look whether the file already arrived before sending it (a retry after the app was killed). */
+    probe?: boolean;
+    signal?: AbortSignal;
+    onProgress?: (fraction: number) => void;
+  } = {},
+): Promise<UploadedMedia> {
   const sb = supabase();
-  const scope = folder.startsWith('boards/') ? folder : `${folder}/${userId}`;
-  const path = `${scope}/${rid()}.jpg`;
-  const bytes = await readBytes(img.uri);
-  const up = await sb.storage.from(MEDIA_BUCKET).upload(path, bytes, { contentType: 'image/jpeg', upsert: false });
-  if (up.error) throw new Error(`Upload failed: ${up.error.message}`);
-  const row = await sb
-    .from('media')
-    .insert({ owner_id: userId, bucket: MEDIA_BUCKET, storage_path: path, kind: 'image', mime_type: 'image/jpeg', width: img.width, height: img.height, bytes: bytes.byteLength })
-    .select('id')
-    .single();
-  if (row.error) {
-    await sb.storage
-      .from(MEDIA_BUCKET)
-      .remove([path])
-      .catch(() => undefined);
-    throw new Error(`Couldn’t save media: ${row.error.message}`);
+  const path = mediaPath(userId, folder, 'jpg', opts.name);
+  let bytes = img.fileSize ?? 0;
+  if (Platform.OS === 'web') {
+    const data = await readBytes(img.uri);
+    bytes = data.byteLength;
+    const up = await withTimeout(sb.storage.from(MEDIA_BUCKET).upload(path, data, { contentType: 'image/jpeg', upsert: false }), STALL_MS);
+    if (up.error && !(opts.name && alreadyExists(up.error.message, Number((up.error as { statusCode?: string }).statusCode)))) throw new Error(`Upload failed: ${up.error.message}`);
+    opts.onProgress?.(1);
+  } else if (opts.name && opts.probe && (await alreadyUploaded(path))) {
+    opts.onProgress?.(1);
+  } else {
+    // Native: streamed from the file (never read into JS memory), with progress and a stall timeout.
+    await uploadFileWithProgress(path, img.uri, 'image/jpeg', opts.onProgress, opts.signal, { idempotent: !!opts.name });
+    bytes = bytes || ((await fileSize(img.uri)) ?? 0);
   }
-  return { id: row.data.id as string, url: mediaUrl(path), path, width: img.width, height: img.height, mimeType: 'image/jpeg' };
+  let id: string;
+  try {
+    id = await recordMedia({ owner_id: userId, bucket: MEDIA_BUCKET, storage_path: path, kind: 'image', mime_type: 'image/jpeg', width: img.width, height: img.height, bytes: bytes || null }, opts.signal);
+  } catch (e) {
+    // A one-off upload removes its file again; a draft's file stays for the retry (the draft cleans it up if discarded).
+    if (!opts.name) await sb.storage.from(MEDIA_BUCKET).remove([path]).catch(() => undefined);
+    throw e;
+  }
+  return { id, url: mediaUrl(path), path, width: img.width, height: img.height, mimeType: 'image/jpeg' };
 }
 
 /**
@@ -225,6 +345,18 @@ export async function uploadImages(userId: string, folder: MediaFolder, imgs: Pi
   return out;
 }
 
+/** Remove a prepared (resized) temporary file once it has uploaded. Never the original. */
+export async function removeTempFile(uri: string | undefined): Promise<void> {
+  if (!uri || Platform.OS === 'web') return;
+  try {
+    const { File } = await import('expo-file-system');
+    const f = new File(uri);
+    if (f.exists) f.delete();
+  } catch {
+    /* best effort */
+  }
+}
+
 // ─── Short video (Phase 6C) ──────────────────────────────────────────────────
 
 export interface PickedVideo {
@@ -236,6 +368,8 @@ export interface PickedVideo {
   mimeType: string;
   /** Poster frame made on the phone right after picking (reused for the upload). */
   poster?: PickedImage | null;
+  /** Posting reliability: recorded with Chimp's camera (not already in Photos). */
+  captured?: boolean;
 }
 
 export interface UploadedVideo extends UploadedMedia {
@@ -319,6 +453,9 @@ export interface UploadProgress {
   stage: 'preparing' | 'uploading' | 'saving';
   /** 0–1 while uploading, when known. */
   fraction?: number;
+  /** Posting reliability: which file of how many (0-based index). */
+  index?: number;
+  total?: number;
 }
 
 /**
@@ -326,41 +463,86 @@ export interface UploadProgress {
  * (it is never read into JS memory) with the user's own access token. Web:
  * supabase-js (no progress events).
  */
-async function uploadFileWithProgress(path: string, uri: string, contentType: string, onProgress?: (f: number) => void, signal?: AbortSignal): Promise<void> {
+async function uploadFileWithProgress(
+  path: string,
+  uri: string,
+  contentType: string,
+  onProgress?: (f: number) => void,
+  signal?: AbortSignal,
+  opts: { idempotent?: boolean } = {},
+): Promise<'uploaded' | 'exists'> {
   const sb = supabase();
   if (Platform.OS === 'web') {
     const bytes = await readBytes(uri);
-    const up = await sb.storage.from(MEDIA_BUCKET).upload(path, bytes, { contentType, upsert: false });
-    if (up.error) throw new Error(storageMessage(up.error.message));
+    const up = await withTimeout(sb.storage.from(MEDIA_BUCKET).upload(path, bytes, { contentType, upsert: false }), STALL_MS * 4);
+    if (up.error) {
+      if (opts.idempotent && alreadyExists(up.error.message, Number((up.error as { statusCode?: string }).statusCode))) return 'exists';
+      throw new Error(storageMessage(up.error.message));
+    }
     onProgress?.(1);
-    return;
+    return 'uploaded';
   }
-  const { data } = await sb.auth.getSession();
-  const token = data.session?.access_token;
-  if (!token) throw new Error('You’re signed out. Sign in again to post.');
+  for (let attempt = 0; ; attempt++) {
+    // A fresh token every time (getSession refreshes an expired one).
+    const { data, error } = attempt ? await sb.auth.refreshSession() : await sb.auth.getSession();
+    const token = data.session?.access_token;
+    // No token because the phone is offline is not "signed out".
+    if (!token && error && /fetch|network|timed out|offline/i.test(error.message)) throw new Error('Network request failed');
+    if (!token) throw new Error('You’re signed out. Sign in again to post.');
+    const res = await streamOnce(path, uri, contentType, token, onProgress, signal);
+    if (res.status >= 200 && res.status < 300) return 'uploaded';
+    let msg = `HTTP ${res.status}`;
+    try {
+      msg = JSON.parse(res.body)?.message ?? JSON.parse(res.body)?.error ?? msg;
+    } catch {
+      /* keep the status */
+    }
+    if (opts.idempotent && alreadyExists(msg, res.status)) return 'exists';
+    // The access token expired mid-way: refresh once and send it again.
+    if (attempt === 0 && (res.status === 401 || /jwt|expired|unauthori[sz]ed/i.test(msg))) continue;
+    throw new Error(storageMessage(msg, res.status));
+  }
+}
+
+/**
+ * One streamed upload. FOREGROUND session on purpose: an iOS background
+ * session waits indefinitely for a lost connection (the "post never finishes"
+ * case). Here a stalled upload — no progress for STALL_MS — is cancelled and
+ * reported, and the post can be retried; a file that did arrive is found again
+ * by its stable path. Chimp does not claim uploads continue after you leave it.
+ */
+async function streamOnce(path: string, uri: string, contentType: string, token: string, onProgress?: (f: number) => void, signal?: AbortSignal): Promise<{ status: number; body: string }> {
   const { File, UploadTask, UploadType } = await import('expo-file-system');
+  let stalled = false;
+  let watchdog: ReturnType<typeof setTimeout> | null = null;
   const task = new UploadTask(new File(uri), storageObjectUrl(path), {
     httpMethod: 'POST',
     uploadType: UploadType.BINARY_CONTENT,
+    sessionType: 'foreground',
     headers: { Authorization: `Bearer ${token}`, apikey: publishableKey(), 'Content-Type': contentType, 'x-upsert': 'false', 'cache-control': '3600' },
     onProgress: (p) => {
+      arm();
       if (p.totalBytes > 0) onProgress?.(Math.min(1, p.bytesSent / p.totalBytes));
     },
   });
+  const arm = () => {
+    if (watchdog) clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      stalled = true;
+      task.cancel();
+    }, STALL_MS);
+  };
   const abort = () => task.cancel();
   signal?.addEventListener('abort', abort);
+  arm();
   try {
-    const res = await task.uploadAsync();
-    if (res.status < 200 || res.status >= 300) {
-      let msg = `HTTP ${res.status}`;
-      try {
-        msg = JSON.parse(res.body)?.message ?? msg;
-      } catch {
-        /* keep the status */
-      }
-      throw new Error(storageMessage(msg, res.status));
-    }
+    return await task.uploadAsync();
+  } catch (e) {
+    if (stalled) throw new UploadStalledError();
+    if (signal?.aborted) throw new Error('Post cancelled.');
+    throw e;
   } finally {
+    if (watchdog) clearTimeout(watchdog);
     signal?.removeEventListener('abort', abort);
     task.release();
   }
@@ -377,30 +559,41 @@ function storageMessage(raw: string, status?: number): string {
  * `media` row (kind 'video', mime, bytes, duration, width/height, poster).
  * If the row can't be saved, the uploaded files are removed again.
  */
-export async function uploadVideo(userId: string, v: PickedVideo, onProgress?: (p: UploadProgress) => void, signal?: AbortSignal): Promise<UploadedVideo> {
+export function videoPaths(userId: string, v: Pick<PickedVideo, 'mimeType'>, name: string, poster: boolean): { path: string; posterPath?: string } {
+  const ext = v.mimeType === 'video/quicktime' ? 'mov' : 'mp4';
+  return { path: `posts/${userId}/${name}.${ext}`, posterPath: poster ? `posts/${userId}/${name}-poster.jpg` : undefined };
+}
+
+export async function uploadVideo(
+  userId: string,
+  v: PickedVideo,
+  onProgress?: (p: UploadProgress) => void,
+  signal?: AbortSignal,
+  /** Posting reliability: a stable name (draft media key): a retry resumes instead of re-uploading. */
+  name?: string,
+  /** Look whether the files already arrived before sending them (a retry after the app was killed). */
+  probe?: boolean,
+): Promise<UploadedVideo> {
   const sb = supabase();
   onProgress?.({ stage: 'preparing' });
   const bytes = v.fileSize ?? (await fileSize(v.uri)) ?? 0;
   const problem = videoProblem({ ...v, fileSize: bytes || v.fileSize });
   if (problem) throw new Error(problem);
   const poster = v.poster ?? (await makePoster(v));
-  const id = rid();
-  const ext = v.mimeType === 'video/quicktime' ? 'mov' : 'mp4';
-  const path = `posts/${userId}/${id}.${ext}`;
-  const posterPath = poster ? `posts/${userId}/${id}-poster.jpg` : undefined;
+  const { path, posterPath } = videoPaths(userId, v, name ?? rid(), !!poster);
   const uploaded: string[] = [];
   try {
     if (poster && posterPath) {
-      await uploadFileWithProgress(posterPath, poster.uri, 'image/jpeg', undefined, signal);
+      if (!(name && probe && (await alreadyUploaded(posterPath)))) await uploadFileWithProgress(posterPath, poster.uri, 'image/jpeg', undefined, signal, { idempotent: !!name });
       uploaded.push(posterPath);
     }
     onProgress?.({ stage: 'uploading', fraction: 0 });
-    await uploadFileWithProgress(path, v.uri, v.mimeType, (f) => onProgress?.({ stage: 'uploading', fraction: f }), signal);
+    if (name && probe && (await alreadyUploaded(path))) onProgress?.({ stage: 'uploading', fraction: 1 });
+    else await uploadFileWithProgress(path, v.uri, v.mimeType, (f) => onProgress?.({ stage: 'uploading', fraction: f }), signal, { idempotent: !!name });
     uploaded.push(path);
     onProgress?.({ stage: 'saving' });
-    const row = await sb
-      .from('media')
-      .insert({
+    const id = await recordMedia(
+      {
         owner_id: userId,
         bucket: MEDIA_BUCKET,
         storage_path: path,
@@ -411,12 +604,11 @@ export async function uploadVideo(userId: string, v: PickedVideo, onProgress?: (
         duration_ms: v.durationMs ? Math.round(v.durationMs) : null,
         bytes: bytes || null,
         poster_path: posterPath ?? null,
-      })
-      .select('id')
-      .single();
-    if (row.error) throw new Error(`Couldn’t save the video: ${row.error.message}`);
+      },
+      signal,
+    );
     return {
-      id: row.data.id as string,
+      id,
       url: mediaUrl(path),
       path,
       width: v.width,
@@ -428,8 +620,10 @@ export async function uploadVideo(userId: string, v: PickedVideo, onProgress?: (
       posterPath,
     };
   } catch (e) {
-    // Never leave orphaned files behind a failed post.
-    if (uploaded.length) await sb.storage.from(MEDIA_BUCKET).remove(uploaded).catch(() => undefined);
+    // Never leave orphaned files behind a failed post. (A draft keeps them for
+    // its retry — re-sending a 50 MB clip is the slow part — and removes them
+    // itself if it's discarded.)
+    if (uploaded.length && !name) await sb.storage.from(MEDIA_BUCKET).remove(uploaded).catch(() => undefined);
     throw e;
   }
 }
@@ -447,3 +641,26 @@ export async function discardMedia(items: { id: string; path: string; posterPath
     () => undefined,
   );
 }
+
+/**
+ * Posting reliability: remove a discarded draft's server files by PATH (its
+ * stable paths are known before anything uploads, so nothing is orphaned even
+ * if the app was killed between the upload and saving the media row). Throws
+ * when offline, so the caller can keep it queued and try again later.
+ */
+export async function discardPaths(paths: string[]): Promise<void> {
+  if (!paths.length) return;
+  const sb = supabase();
+  const t = timeoutSignal(DB_TIMEOUT_MS);
+  try {
+    // Media rows first (they reference the files), then the files.
+    const del = await sb.from('media').delete().in('storage_path', paths).abortSignal(t.signal);
+    if (del.error && kindOfMessage(del.error.message) === 'network') throw new Error(del.error.message);
+    const rm = await withTimeout(sb.storage.from(MEDIA_BUCKET).remove(paths), DB_TIMEOUT_MS);
+    if (rm.error && kindOfMessage(rm.error.message) === 'network') throw new Error(rm.error.message);
+  } finally {
+    t.clear();
+  }
+}
+
+const kindOfMessage = (m: string) => (/network|fetch|timed out|load failed|abort/i.test(m) ? 'network' : 'other');

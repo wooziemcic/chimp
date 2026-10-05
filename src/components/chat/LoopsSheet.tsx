@@ -2,8 +2,8 @@ import { router } from 'expo-router';
 import { Calendar, ChevronLeft, Globe2, MapPin, Repeat } from 'lucide-react-native';
 import { useMemo, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useDeviceInsets } from '@/components/system/SafeArea';
 import { Segmented } from '@/components/ui/Segmented';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
@@ -33,7 +33,7 @@ interface Props {
  * them. Deliberately not a task manager: a title, a note, a day, a place.
  */
 export function LoopsSheet({ conversationId, view, onView, moderator }: Props) {
-  const insets = useSafeAreaInsets();
+  const insets = useDeviceInsets(); // Phase 8: a Modal sheet covers the whole phone → its real insets
   const loops = useChat((s) => s.extras[conversationId]?.loops) ?? NO_LOOPS;
   const [tab, setTab] = useState<'open' | 'resolved'>('open');
   const list = useMemo(() => loops.filter((l) => l.status === tab).sort((a, b) => (tab === 'open' ? b.created_at.localeCompare(a.created_at) : (b.resolved_at ?? '').localeCompare(a.resolved_at ?? ''))), [loops, tab]);

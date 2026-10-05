@@ -16,6 +16,7 @@ import { interestById } from '@/data/interests';
 import { ds } from '@/services/dataset';
 import { repo } from '@/services/repository';
 import type { Board, BuzzItem, DriftItem, EntityRef, HappeningItem, ImageSrc, Post, Reason, Scored, Story } from '@/types/models';
+import { byNewest, type Engaged, mostEngaged, newestFirst, type Timed } from '@/utils/feedOrder';
 
 import { exposureFor } from '@/store/useExposure';
 
@@ -250,15 +251,41 @@ export const createdMs = (item: { createdAtMs?: number; ageHours: number }, now 
 /** A Buzz's like total: everyone else's (the backend's real count) plus yours. */
 export const totalLikes = (ctx: GraphContext, b: BuzzItem) => b.likeCount + (ctx.s.buzzLikes[b.id] ? 1 : 0);
 
+/** An item's creation time for the newest-first rules (id breaks ties). */
+export const timed = (item: { id: string; createdAtMs?: number; ageHours: number }, now = Date.now()): Timed => ({ id: item.id, createdMs: createdMs(item, now) });
+
+/** A Buzz's engagement: likes (real totals incl. yours) and comments (replies). */
+export const buzzEngagement = (ctx: GraphContext, b: BuzzItem, now = Date.now()): Engaged => ({ ...timed(b, now), likes: totalLikes(ctx, b), comments: b.replyCount });
+
+/** Buzz the viewer may see on any surface: never After Dark, never someone you blocked. */
+export function visibleBuzz(ctx: GraphContext): BuzzItem[] {
+  return repo
+    .buzz()
+    .filter((b) => !isAfterDarkBoard(repo.board(b.boardId)))
+    .filter((b) => !b.authorId || !ctx.s.blocked[b.authorId]);
+}
+
+/**
+ * What the Buzz tabs show, in order (pre-TestFlight ordering update):
+ *   For You    newest first (created_at desc). No engagement or graph ranking.
+ *   Following  newest first, from people / Worlds you follow (rankBuzz).
+ *   Trending   engagement + small recency boost (rankBuzz).
+ * The graph's own For You ranking (rankBuzz 'forYou') is unchanged; the Agent,
+ * Graph Debug and Drift's reasons still use it.
+ */
+export function buzzFeed(ctx: GraphContext, tab: BuzzTab, now = Date.now()): BuzzItem[] {
+  if (tab === 'forYou') {
+    const byId = new Map(visibleBuzz(ctx).map((b) => [b.id, b]));
+    return newestFirst([...byId.values()].map((b) => timed(b, now))).map((t) => byId.get(t.id)!);
+  }
+  return rankBuzz(ctx, tab).map((x) => x.item);
+}
+
 /** `signals: false` = the plain graph score (Buzz → Drift interleaves it with Drift's own scores). */
 export function rankBuzz(ctx: GraphContext, tab: BuzzTab, opts?: { signals?: boolean }): Scored<BuzzItem>[] {
   const { s } = ctx;
   const neg = negativeFeedback(ctx);
-  const visible = repo
-    .buzz()
-    .filter((b) => !isAfterDarkBoard(repo.board(b.boardId)))
-    .filter((b) => !b.authorId || !s.blocked[b.authorId]);
-  const scored = visible.map((b) => scoreBuzz(ctx, b, neg));
+  const scored = visibleBuzz(ctx).map((b) => scoreBuzz(ctx, b, neg));
   const now = Date.now();
   // Phase 6C: each tab keeps its own, simple ordering rule.
   if (tab === 'following') {
@@ -267,11 +294,13 @@ export function rankBuzz(ctx: GraphContext, tab: BuzzTab, opts?: { signals?: boo
     return scored
       .filter(({ item: b }) => !repo.isMe(b.authorId))
       .filter(({ item: b }) => (b.authorId && (s.following[b.authorId] || s.connections[b.authorId])) || (!!b.boardId && (s.joined[b.boardId] || repo.isMe(repo.board(b.boardId)?.ownerId))))
-      .sort((a, b) => createdMs(b.item, now) - createdMs(a.item, now));
+      .sort((a, b) => byNewest(timed(a.item, now), timed(b.item, now)));
   }
   if (tab === 'trending') {
-    // Deliberately simple for now: most likes first (real totals, incl. yours), then newest.
-    return scored.sort((a, b) => totalLikes(ctx, b.item) - totalLikes(ctx, a.item) || createdMs(b.item, now) - createdMs(a.item, now));
+    // Engagement first (likes + comments, real totals incl. yours), with a small
+    // recency boost and gentle aging (utils/feedOrder → engagementScore).
+    const order = new Map(mostEngaged(scored.map((x) => buzzEngagement(ctx, x.item, now)), now).map((e, i) => [e.id, i]));
+    return scored.sort((a, b) => order.get(a.item.id)! - order.get(b.item.id)!);
   }
   // For You: the graph's ranking, never purely chronological.
   if (!INTELLIGENCE.buzzForYou || opts?.signals === false) return scored.sort((a, b) => b.score - a.score);
@@ -380,6 +409,8 @@ export interface FeedEntry {
   /** Why it's here, in plain words ("Priya posted", "Because you're into Films"). */
   reason: string;
   score: number;
+  /** created_at (ms): Drift is newest first. */
+  createdMs: number;
   video?: boolean;
   durationSec?: number;
   /** Phase 6C: a real clip (url) or, for Demo fixtures, just a poster. */
@@ -415,17 +446,13 @@ export function feedReason(ctx: GraphContext, r: Reason | undefined, boardId: st
 }
 
 /**
- * Happening's visual stream: Drift items and photo Buzz from across your
- * graph, ranked by the same scorers as everywhere else and interleaved so
- * neither type runs in long streaks. Every entry says why it's here. Never
- * After Dark (rankDrift / rankBuzz already exclude it).
+ * Buzz → Drift: World photos / videos and photo or video Buzz, newest first
+ * (created_at desc; pre-TestFlight ordering update — was the graph's score,
+ * interleaved by type). Each entry still says why it's here, from the graph's
+ * reasons. Text-only posts never appear; neither does anything you disliked,
+ * anyone you blocked, or After Dark.
  */
-/**
- * Buzz → Drift: its own visual ranking (the graph's scores, interleaved so
- * neither Worlds' media nor Buzz media floods it). Text-only posts never
- * appear; neither does anything you disliked or After Dark.
- */
-export function buildDriftFeed(ctx: GraphContext, limit = 60): FeedEntry[] {
+export function buildDriftFeed(ctx: GraphContext, limit = 60, now = Date.now()): FeedEntry[] {
   const drift: FeedEntry[] = rankDrift(ctx)
     .filter(({ item: d }) => !ctx.s.driftDislikes?.[d.id] && !!d.image)
     .map(({ item: d, score, reasons }) => ({
@@ -438,6 +465,7 @@ export function buildDriftFeed(ctx: GraphContext, limit = 60): FeedEntry[] {
     boardId: d.boardId,
     reason: feedReason(ctx, reasons[0], d.boardId),
     score,
+    createdMs: createdMs(d, now),
     video: d.kind === 'video',
     durationSec: d.durationSec,
     clip: d.kind === 'video' ? { url: d.clipSource, poster: d.image, durationMs: d.durationSec ? d.durationSec * 1000 : undefined } : undefined,
@@ -458,27 +486,93 @@ export function buildDriftFeed(ctx: GraphContext, limit = 60): FeedEntry[] {
       boardId: b.boardId,
       reason: feedReason(ctx, reasons[0], b.boardId),
       score,
+      createdMs: createdMs(b, now),
       likeCount: totalLikes(ctx, b),
     }));
-  // Interleave by score, never more than two of one type in a row when the other has items left.
-  const out: FeedEntry[] = [];
-  let i = 0;
-  let j = 0;
-  let run: FeedEntry['kind'] | null = null;
-  let runLen = 0;
-  while (out.length < limit && (i < drift.length || j < photos.length)) {
-    let pick: FeedEntry;
-    const d = drift[i];
-    const p = photos[j];
-    if (!p || (d && d.score >= p.score)) pick = run === 'drift' && runLen >= 2 && p ? p : d;
-    else pick = run === 'buzz' && runLen >= 2 && d ? d : p;
-    if (pick === d) i++;
-    else j++;
-    runLen = run === pick.kind ? runLen + 1 : 1;
-    run = pick.kind;
-    out.push(pick);
-  }
-  return out;
+  return [...drift, ...photos].sort((a, b) => byNewest({ id: a.key, createdMs: a.createdMs }, { id: b.key, createdMs: b.createdMs })).slice(0, limit);
+}
+
+/** The full-screen Drift viewer's queue: the same items as rankDrift, newest first. */
+export function driftQueue(ctx: GraphContext, now = Date.now()): DriftItem[] {
+  const byId = new Map(rankDrift(ctx).map((x) => [x.item.id, x.item]));
+  return newestFirst([...byId.values()].map((d) => timed(d, now))).map((t) => byId.get(t.id)!);
+}
+
+// ─── Profile → Recent Posts ─────────────────────────────────────────────────
+
+/**
+ * Can the viewer see a World's content? The app-side mirror of the server's
+ * `can_see_board` (RLS decides what a real account ever receives; this keeps
+ * Demo and cached data to the same rule). No World ("Just Buzz") = visible.
+ * After Dark never shows outside After Dark.
+ */
+export function canViewBoard(ctx: GraphContext, boardId: string | null | undefined): boolean {
+  if (!boardId) return true;
+  const b = repo.board(boardId);
+  if (!b || isAfterDarkBoard(b)) return false;
+  if (b.visibility === 'public' || repo.isMe(b.ownerId) || ctx.s.joined[b.id] || b.memberPreview.includes(repo.meId())) return true;
+  return b.visibility === 'connections' && !!ctx.s.connections[b.ownerId];
+}
+
+/** One tile in a profile's Recent Posts grid (the same canonical Buzz / Drift item, never a copy). */
+export interface ProfilePost {
+  key: string;
+  kind: 'buzz' | 'drift';
+  id: string;
+  createdMs: number;
+  /** Photo, or a video's poster frame. None = a text card. */
+  thumb?: ImageSrc;
+  video?: boolean;
+  /** More than one photo. */
+  multi?: boolean;
+  /** Words for a text card (and the accessibility label). */
+  text: string;
+  poll?: boolean;
+  href: `/buzz/${string}` | `/drift/${string}`;
+}
+
+/**
+ * A person's Buzz and World photo / video posts, newest first, limited to
+ * what the viewer may see: nobody you blocked, no After Dark, no World you
+ * can't see (canViewBoard). Demo fixture news never counts as anyone's post.
+ */
+export function recentPostsFor(ctx: GraphContext, personId: string, now = Date.now()): ProfilePost[] {
+  if (!personId || (!repo.isMe(personId) && ctx.s.blocked[personId])) return [];
+  const buzz: ProfilePost[] = repo
+    .buzz()
+    .filter((b) => b.authorId === personId && b.kind !== 'news' && canViewBoard(ctx, b.boardId))
+    .map((b) => {
+      const images = b.images?.length ? b.images : b.image ? [b.image] : [];
+      return {
+        key: `buzz:${b.id}`,
+        kind: 'buzz',
+        id: b.id,
+        createdMs: createdMs(b, now),
+        thumb: b.video ? b.video.poster ?? b.image : images[0],
+        video: !!b.video,
+        multi: !b.video && images.length > 1,
+        text: b.memeText ?? b.body ?? b.title ?? b.poll?.question ?? '',
+        poll: !!b.poll,
+        href: `/buzz/${b.id}`,
+      };
+    });
+  const drift: ProfilePost[] = repo
+    .drift()
+    .filter((d) => d.authorId === personId && canViewBoard(ctx, d.boardId))
+    .map((d) => ({
+      key: `drift:${d.id}`,
+      kind: 'drift',
+      id: d.id,
+      createdMs: createdMs(d, now),
+      thumb: d.image,
+      video: d.kind === 'video',
+      multi: (d.images?.length ?? 0) > 1,
+      text: d.memeText ?? d.caption ?? '',
+      href: `/drift/${d.id}`,
+    }));
+  const all = [...buzz, ...drift];
+  const byKey = new Map(all.map((p) => [p.key, p]));
+  return newestFirst(all.map((p) => ({ id: p.key, createdMs: p.createdMs }))).map((t) => byKey.get(t.id)!);
 }
 
 /** Stories inside Drift: trending World stories first, then people you know. No After Dark. */

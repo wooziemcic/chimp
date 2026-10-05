@@ -16,7 +16,7 @@ import type { Board, BuzzItem, DriftItem, Story } from '@/types/models';
 import { createUserBoard } from './boardFactory';
 import { type NewBuzz, createBuzz, createDrift, createStoryItem, createWorld, removeOldCover, setWorldCover } from './backend/content';
 import { toBoard } from './backend/mappers';
-import { MAX_EDGE, type PickedImage, type PickedVideo, type UploadedMedia, type UploadedVideo, type UploadProgress, discardMedia, prepareImage, uploadImage, uploadImages, uploadVideo } from './backend/media';
+import { MAX_EDGE, type MediaFolder, type PickedImage, type PickedVideo, type UploadedMedia, type UploadedVideo, type UploadProgress, discardMedia, prepareImage, removeTempFile, uploadImage, uploadVideo } from './backend/media';
 import * as realData from './backend/realData';
 import { isRealMode } from './dataset';
 import { repo } from './repository';
@@ -32,16 +32,31 @@ const uidOrThrow = () => {
 };
 
 /**
- * Phase 6C: one post attempt. The composer keeps it across retries, so files
- * that already uploaded aren't uploaded again and the post keeps the same id
- * (a retry after a lost response can never create a second Buzz).
+ * One post attempt (Phase 6C), kept across retries. Posting reliability: it
+ * is the persisted draft's state (services/postDrafts.ts) — its id is the
+ * post's id (a retry after a lost response can never create a second post),
+ * files are keyed by the draft's media keys and, with `stableNames`, uploaded
+ * to stable paths (a retry — even after the app was killed — finds a file
+ * that already arrived instead of sending it again).
  */
 export interface PostJob {
   clientId: string;
   uploaded: Record<string, UploadedMedia | UploadedVideo>;
   posted?: boolean;
+  stableNames?: boolean;
+  /** A retry: before re-sending a file, look whether it already arrived (the app was killed before recording it). */
+  probeFirst?: boolean;
+  /** Called as each file is uploaded and recorded (the draft persists it). */
+  onUploaded?: (key: string, m: UploadedMedia | UploadedVideo) => void;
 }
 export const newPostJob = (): PostJob => ({ clientId: uuid(), uploaded: {} });
+
+/** One photo or clip in a post, with its stable key within the draft. */
+export interface PostMedia {
+  key: string;
+  image?: PickedImage;
+  video?: PickedVideo;
+}
 
 /** Remove uploads of a post that was abandoned (composer closed after a failure). */
 export async function abandonPostJob(job: PostJob): Promise<void> {
@@ -51,41 +66,77 @@ export async function abandonPostJob(job: PostJob): Promise<void> {
   await discardMedia(items);
 }
 
+/** Stable file name for a draft's media: `{postId}-{key}`. */
+export const stableName = (job: PostJob, key: string) => (job.stableNames ? `${job.clientId}-${key}` : undefined);
+
+const devTiming = (label: string, t0: number, extra?: Record<string, unknown>) => {
+  if (__DEV__) console.log(`[chimp:post] ${label} ${Date.now() - t0}ms`, extra ? JSON.stringify(extra) : '');
+};
+
+/**
+ * Upload (or reuse) every photo / clip of a post, in order, with progress
+ * "file k of n". Photos are resized on the phone first; the resized temp file
+ * is removed once it has uploaded. Development builds log each stage's time
+ * and byte sizes (never contents or URLs).
+ */
+async function uploadAll(
+  uid: string,
+  folder: MediaFolder,
+  maxEdge: number,
+  items: PostMedia[],
+  job: PostJob,
+  opts: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal },
+): Promise<(UploadedMedia | UploadedVideo)[]> {
+  const out: (UploadedMedia | UploadedVideo)[] = [];
+  const total = items.length;
+  for (const [i, it] of items.entries()) {
+    let m = job.uploaded[it.key];
+    if (!m) {
+      if (opts.signal?.aborted) throw new Error('Post cancelled.');
+      const at = { index: i, total };
+      if (it.video) {
+        const t0 = Date.now();
+        m = await uploadVideo(uid, it.video, (p) => opts.onProgress?.({ ...p, ...at }), opts.signal, stableName(job, it.key), job.probeFirst);
+        devTiming('video upload', t0, { bytes: it.video.fileSize, ms: it.video.durationMs });
+      } else if (it.image) {
+        opts.onProgress?.({ stage: 'preparing', ...at });
+        const t0 = Date.now();
+        const prepared = await prepareImage(it.image, maxEdge);
+        devTiming('resize', t0, { from: `${it.image.width}x${it.image.height}`, to: `${prepared.width}x${prepared.height}`, srcBytes: it.image.fileSize });
+        const t1 = Date.now();
+        opts.onProgress?.({ stage: 'uploading', fraction: 0, ...at });
+        try {
+          m = await uploadImage(uid, folder, prepared, { name: stableName(job, it.key), probe: job.probeFirst, signal: opts.signal, onProgress: (f) => opts.onProgress?.({ stage: 'uploading', fraction: f, ...at }) });
+        } finally {
+          void removeTempFile(prepared.uri === it.image.uri ? undefined : prepared.uri);
+        }
+        devTiming('photo upload', t1);
+      } else continue;
+      job.uploaded[it.key] = m;
+      job.onUploaded?.(it.key, m);
+    }
+    out.push(m);
+  }
+  return out;
+}
+
 export async function postBuzz(
   input: NewBuzz,
-  images: PickedImage[],
-  opts: { video?: PickedVideo | null; job?: PostJob; onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {},
+  items: PostMedia[],
+  opts: { job?: PostJob; onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {},
 ): Promise<BuzzItem> {
   const job = opts.job ?? newPostJob();
-  const video = opts.video ?? null;
+  const video = items.find((m) => m.video)?.video ?? null;
+  const images = items.filter((m) => m.image).map((m) => m.image!);
   let item: BuzzItem;
   if (isRealMode()) {
     const uid = uidOrThrow();
-    const media: (UploadedMedia | UploadedVideo)[] = [];
-    for (const [k, img] of images.entries()) {
-      let m = job.uploaded[img.uri];
-      if (!m) {
-        opts.onProgress?.({ stage: 'uploading', fraction: k / images.length });
-        m = await uploadImage(uid, 'posts', await prepareImage(img, MAX_EDGE.post));
-        job.uploaded[img.uri] = m;
-      }
-      media.push(m);
-    }
-    if (video) {
-      let m = job.uploaded[video.uri];
-      if (!m) {
-        m = await uploadVideo(uid, video, opts.onProgress, opts.signal);
-        job.uploaded[video.uri] = m;
-      }
-      media.push(m);
-    }
-    if (opts.signal?.aborted) {
-      // You left the composer while it uploaded: nothing is posted, and nothing is left behind.
-      await abandonPostJob(job);
-      throw new Error('Post cancelled.');
-    }
+    const media = await uploadAll(uid, 'posts', MAX_EDGE.post, items, job, opts);
+    if (opts.signal?.aborted) throw new Error('Post cancelled.');
     opts.onProgress?.({ stage: 'saving' });
+    const t0 = Date.now();
     item = await createBuzz(uid, { ...input, clientId: job.clientId }, media);
+    devTiming('post row', t0);
     job.posted = true;
     realData.addBuzz(item);
   } else {
@@ -120,12 +171,22 @@ export async function postBuzz(
   return item;
 }
 
-export async function postDrift(boardId: string, caption: string, images: PickedImage[]): Promise<DriftItem> {
+export async function postDrift(
+  boardId: string,
+  caption: string,
+  items: PostMedia[],
+  opts: { job?: PostJob; onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {},
+): Promise<DriftItem> {
+  const job = opts.job ?? newPostJob();
+  const images = items.filter((m) => m.image).map((m) => m.image!);
   let item: DriftItem;
   if (isRealMode()) {
     const uid = uidOrThrow();
-    const media = await uploadImages(uid, 'drift', images, MAX_EDGE.post);
-    item = await createDrift(uid, boardId, caption, media);
+    const media = (await uploadAll(uid, 'drift', MAX_EDGE.post, items, job, opts)) as UploadedMedia[];
+    if (opts.signal?.aborted) throw new Error('Post cancelled.');
+    opts.onProgress?.({ stage: 'saving' });
+    item = await createDrift(uid, boardId, caption, media, job.clientId);
+    job.posted = true;
     realData.addDrift(item);
   } else {
     item = {
@@ -142,17 +203,28 @@ export async function postDrift(boardId: string, caption: string, images: Picked
       createdAtMs: Date.now(),
       tall: images[0].height > images[0].width,
     };
+    job.posted = true;
     useChimp.getState().addCreated('drift', item);
   }
   useChimp.getState().track('create', { kind: 'board', id: boardId });
   return item;
 }
 
-export async function postStory(boardId: string | null, caption: string, image: PickedImage): Promise<void> {
+export async function postStory(
+  boardId: string | null,
+  caption: string,
+  item: PostMedia,
+  opts: { job?: PostJob; onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {},
+): Promise<void> {
+  const job = opts.job ?? newPostJob();
+  const image = item.image!;
   if (isRealMode()) {
     const uid = uidOrThrow();
-    const up = await uploadImage(uid, 'stories', await prepareImage(image, MAX_EDGE.story));
-    const row = await createStoryItem(uid, boardId, caption, up);
+    const [up] = (await uploadAll(uid, 'stories', MAX_EDGE.story, [item], job, opts)) as UploadedMedia[];
+    if (opts.signal?.aborted) throw new Error('Post cancelled.');
+    opts.onProgress?.({ stage: 'saving' });
+    const row = await createStoryItem(uid, boardId, caption, up, job.clientId);
+    job.posted = true;
     realData.addStoryRow(row, up.url);
   } else {
     const me = repo.me();
@@ -163,6 +235,7 @@ export async function postStory(boardId: string | null, caption: string, image: 
       ? { ...existing, cover: image.uri, items: [...existing.items, frame] }
       : { id, owner: { kind: 'person', id: me.id }, title: me.displayName, cover: image.uri, lane: 'friend', items: [frame] };
     const created = useChimp.getState().created;
+    job.posted = true;
     useChimp.setState({ created: { ...created, stories: [story, ...created.stories.filter((s) => s.id !== id)] } });
   }
   if (boardId) useChimp.getState().track('create', { kind: 'board', id: boardId });

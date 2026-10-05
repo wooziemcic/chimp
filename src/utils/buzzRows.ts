@@ -6,9 +6,10 @@
  * goes first (that was the 6B bug: a newer text post appeared below an older
  * photo post). A half card with no partner gets a full-width row of its own.
  *
- * pinFresh: For You only. Your own posts from the last 30 minutes lead, newest
- * first (server timestamps once saved; the phone's clock only for items that
- * exist on this phone alone, i.e. Demo), then the ranked feed without them.
+ * pinFresh: your own posts from the last 30 minutes first, newest first, then
+ * the rest. No surface uses it since For You and Buzzing changed (For You is
+ * newest first, so your new post is already at the top; Buzzing is ranked by
+ * engagement and pins nothing). Kept for its tests and as a building block.
  */
 export interface RowItem {
   id: string;

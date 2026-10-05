@@ -38,6 +38,7 @@ export function RealChat({ personId, draft }: { personId: string; draft?: string
   const connected = useChimp((s) => !!s.connections[personId]);
   const conversationWith = useChat((s) => s.conversationWith);
   const openChat = useChat((s) => s.open);
+  const chatReady = useChat((s) => !!s.uid);
   const closeChat = useChat((s) => s.close);
   const respond = useChat((s) => s.respond);
   const [cid, setCid] = useState<string | null>(useChat.getState().byPerson[personId] ?? null);
@@ -49,7 +50,11 @@ export function RealChat({ personId, draft }: { personId: string; draft?: string
   const live = useChat((s) => s.live);
 
   // Resolve the conversation, open it (loads messages, marks read), close it on leave.
+  // Phase 8: only once chat is bound to this account — if chat (re)starts while
+  // this screen is open (sign-in settling, cold start, reconnect restart), the
+  // chat is opened again instead of silently losing its live updates.
   useEffect(() => {
+    if (!chatReady) return;
     let alive = true;
     let opened: string | null = null;
     (async () => {
@@ -74,7 +79,7 @@ export function RealChat({ personId, draft }: { personId: string; draft?: string
       alive = false;
       if (opened) closeChat(opened);
     };
-  }, [personId, conversationWith, openChat, closeChat]);
+  }, [personId, conversationWith, openChat, closeChat, chatReady]);
 
   const first = user?.displayName.split(' ')[0] ?? 'them';
 

@@ -17,6 +17,8 @@ import { PingSheet } from './PingSheet';
 import { RevealCard } from './RevealCard';
 import { useMinuteClock } from './useGroupChemistry';
 import { useComposerNavSpace } from '@/hooks/useLayout';
+import { receiptFor, receiptMessageId } from '@/utils/receipts';
+import { SeenBySheet } from './SeenBySheet';
 
 /** "Today" / "Yesterday" / "Sep 24" separators between days. */
 function dayLabel(iso: string): string {
@@ -62,6 +64,7 @@ export function ConversationBody({ conversationId: cid, group, otherName, placeh
   const extras = useChat((s) => s.extras[cid]) ?? EMPTY_EXTRAS;
   useChat((s) => s.people); // re-render when names arrive
   const revealId = useChat((s) => s.reveal[cid]);
+  const receipts = useChat((s) => s.receipts[cid]);
   const send = useChat((s) => s.send);
   const retry = useChat((s) => s.retry);
   const toggleReaction = useChat((s) => s.toggleReaction);
@@ -75,6 +78,7 @@ export function ConversationBody({ conversationId: cid, group, otherName, placeh
   const [loops, setLoops] = useState<LoopsView | null>(null);
   const [pingOpen, setPingOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [seenBy, setSeenBy] = useState<{ ids: string[]; of: number } | null>(null);
   const inner = useRef<ComposerHandle>(null);
   const composer = composerRef ?? inner;
   const navSpace = useComposerNavSpace();
@@ -91,6 +95,12 @@ export function ConversationBody({ conversationId: cid, group, otherName, placeh
     return map;
   }, [reactions]);
   const now = useMinuteClock();
+  // Phase 8: one status line — under my newest message, if it's the newest in the chat.
+  const receiptId = useMemo(() => receiptMessageId(messages, uid), [messages, uid]);
+  const receipt = useMemo(() => {
+    const m = receiptId ? byId.get(receiptId) : undefined;
+    return m ? receiptFor(m, uid, group ? 'group' : 'direct', receipts) : null;
+  }, [receiptId, byId, uid, group, receipts]);
 
   const nameOf = useCallback((id: string) => (id === uid ? 'You' : chatUser(id)?.displayName.split(' ')[0] ?? 'Someone'), [uid]);
   const myPing = extras.myPings.find((p) => !p.match_id && Date.parse(p.expires_at) > now);
@@ -145,6 +155,8 @@ export function ConversationBody({ conversationId: cid, group, otherName, placeh
                 onLongPress={setMenuFor}
                 onRetry={() => item.clientId && void retry(cid, item.clientId)}
                 onToggleReaction={(e) => react(item.id, e)}
+                receipt={item.id === receiptId ? receipt : undefined}
+                onReceiptPress={item.id === receiptId && receipt?.kind === 'seenBy' ? () => setSeenBy({ ids: receipt.ids, of: receipt.of }) : undefined}
               />
             </View>
           );
@@ -211,6 +223,7 @@ export function ConversationBody({ conversationId: cid, group, otherName, placeh
         onLoop={() => menuFor && setLoops({ mode: 'new', title: loopTitleFrom(menuFor.body), sourceMessageId: menuFor.id })}
         onDelete={() => (menuFor ? deleteMessage(cid, menuFor.id) : Promise.resolve())}
       />
+      <SeenBySheet ids={seenBy?.ids ?? null} of={seenBy?.of ?? 0} onClose={() => setSeenBy(null)} />
       <LoopsSheet conversationId={cid} view={loops} onView={setLoops} moderator={moderator} />
       <PingSheet
         visible={pingOpen}

@@ -45,14 +45,16 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Chimp uses your photos so you can set a profile picture."
+          "photosPermission": "Chimp uses your photos so you can share them in posts, stories and your profile.",
+          "cameraPermission": "Chimp uses the camera so you can take photos and record short videos to post.",
+          "microphonePermission": "Chimp uses the microphone to record sound for videos you record, and voice notes in After Dark."
         }
       ],
       "expo-video",
       [
         "expo-audio",
         {
-          "microphonePermission": "Chimp uses the microphone only when you record a voice note in After Dark.",
+          "microphonePermission": "Chimp uses the microphone to record sound for videos you record, and voice notes in After Dark.",
           "recordAudioAndroid": true
         }
       ],
@@ -60,6 +62,26 @@
         "expo-notifications",
         {
           "color": "#1D6BFF"
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Chimp uses the camera so you can take photos and record short videos to post.",
+          "microphonePermission": "Chimp uses the microphone to record sound for videos you record, and voice notes in After Dark.",
+          "recordAudioAndroid": true
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Chimp uses your photos so you can share them in posts, stories and your profile.",
+          "savePhotosPermission": "Chimp saves photos and videos you take in Chimp to your library, so they're never lost if a post doesn't go through.",
+          "isAccessMediaLocationEnabled": false,
+          "granularPermissions": [
+            "photo",
+            "video"
+          ]
         }
       ]
     ],

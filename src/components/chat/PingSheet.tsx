@@ -1,8 +1,8 @@
 import { Lock } from 'lucide-react-native';
 import { useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useDeviceInsets } from '@/components/system/SafeArea';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import type { PingKind, PingRow } from '@/services/backend/chat';
@@ -29,7 +29,7 @@ const hoursLeft = (iso: string) => Math.max(1, Math.round((Date.parse(iso) - Dat
  * something compatible within 24 hours. No AI: a fixed map decides.
  */
 export function PingSheet({ visible, group, otherName, mine, onClose, onSend, onCancel }: Props) {
-  const insets = useSafeAreaInsets();
+  const insets = useDeviceInsets(); // Phase 8: a Modal sheet covers the whole phone → its real insets
   const [kind, setKind] = useState<PingKind | null>(null);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);

@@ -13,7 +13,12 @@
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
 import { mediaUrl, supabase } from '@/lib/supabase';
+import type { ReceiptRow } from '@/utils/receipts';
+
 import { backendError, userMessage } from './errors';
+import { topicSeq } from './realtimeTopic';
+
+export type { ReceiptRow };
 
 const sb = () => supabase();
 
@@ -136,6 +141,67 @@ export async function sendMessage(uid: string, conversationId: string, clientId:
 
 export async function markRead(conversationId: string): Promise<void> {
   must(await sb().rpc('mark_conversation_read', { cid: conversationId }), 'Marking read');
+}
+
+/**
+ * Phase 8 (0011): are the read-receipt functions on this project? Until a
+ * call says otherwise we assume yes; "function not found" switches this
+ * session to the Build 5 behaviour (mark_conversation_read, no receipts).
+ */
+let receiptsV2: boolean | null = null;
+const missingFunction = (e: { message: string; code?: string } | null) =>
+  !!e && (e.code === 'PGRST202' || e.code === '42883' || /could not find the function|function .* does not exist/i.test(e.message));
+
+/**
+ * Seen: move my read cursor up to `messageId` (a message I actually had on
+ * screen), in SERVER time. Without a message id: up to the newest message.
+ * Never moves backwards (the server takes the later of old and new).
+ */
+export async function markReadUpto(conversationId: string, messageId?: string | null): Promise<void> {
+  if (receiptsV2 !== false) {
+    const { error } = await sb().rpc('mark_read_upto', { p_cid: conversationId, p_message_id: messageId ?? null });
+    if (!error) {
+      receiptsV2 = true;
+      return;
+    }
+    if (!missingFunction(error)) throw backendError(error, 'Marking read', { passThroughCodes: [] });
+    receiptsV2 = false;
+  }
+  await markRead(conversationId);
+}
+
+/**
+ * Delivered: this app has synced these conversations (all of mine when no id).
+ * Called after the inbox loads and when a message arrives over Realtime —
+ * never because a push was sent. Returns how many cursors moved.
+ */
+export async function markDelivered(conversationId?: string | null): Promise<number> {
+  if (receiptsV2 === false) return 0;
+  const { data, error } = await sb().rpc('mark_delivered', { p_cid: conversationId ?? null });
+  if (missingFunction(error)) {
+    receiptsV2 = false;
+    return 0;
+  }
+  if (error) throw backendError(error, 'Syncing', { passThroughCodes: [] });
+  receiptsV2 = true;
+  return typeof data === 'number' ? data : 0;
+}
+
+/**
+ * Receipts for one conversation, already filtered by the server (blocks,
+ * unanswered requests, After Dark Vibes → nothing). null = not available
+ * (0011 not applied yet): the app then shows only "Sent".
+ */
+export async function fetchReceipts(conversationId: string): Promise<ReceiptRow[] | null> {
+  if (receiptsV2 === false) return null;
+  const { data, error } = await sb().rpc('chat_receipts', { p_cid: conversationId });
+  if (missingFunction(error)) {
+    receiptsV2 = false;
+    return null;
+  }
+  if (error) throw backendError(error, 'Loading receipts', { passThroughCodes: [] });
+  receiptsV2 = true;
+  return (data ?? []) as ReceiptRow[];
 }
 
 export async function respondToRequest(conversationId: string, accept: boolean): Promise<void> {
@@ -342,6 +408,20 @@ export async function deleteLoop(id: string): Promise<void> {
 }
 
 /**
+ * Phase 8: what a member-row event tells us. Realtime sends the new row on
+ * INSERT / UPDATE (only rows RLS lets me read) and just the key on DELETE.
+ */
+export interface MemberChange {
+  event: 'INSERT' | 'UPDATE' | 'DELETE' | 'UNKNOWN';
+  row?: Partial<MemberRow> & { last_delivered_at?: string | null };
+}
+function memberChange(p: { eventType?: string; new?: unknown; old?: unknown }): MemberChange {
+  const event = p.eventType === 'INSERT' || p.eventType === 'UPDATE' || p.eventType === 'DELETE' ? p.eventType : 'UNKNOWN';
+  const row = (event === 'DELETE' ? p.old : p.new) as MemberChange['row'];
+  return { event, row: row && typeof row === 'object' ? row : undefined };
+}
+
+/**
  * Live updates inside one open conversation: reactions, Same Brain, Open
  * Loops, revealed Ping matches, member changes. (Realtime applies RLS; DELETE
  * events carry only a random id, so they reveal nothing.)
@@ -355,12 +435,12 @@ export function subscribeConversation(
     onLoop: (l: LoopRow) => void;
     onLoopGone: (id: string) => void;
     onMatch: (m: PingMatchRow) => void;
-    onMembers: () => void;
+    onMembers: (change: MemberChange) => void;
   },
 ): () => void {
   const f = `conversation_id=eq.${cid}`;
   const channel: RealtimeChannel = sb()
-    .channel(`conv:${cid}`)
+    .channel(`conv:${cid}:${topicSeq()}`)
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'message_reactions', filter: f }, (p) => h.onReaction(p.new as ReactionRow))
     .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'message_reactions' }, (p) => h.onReactionGone((p.old as { id: string }).id))
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'same_brain_events', filter: f }, (p) => h.onSameBrain(p.new as SameBrainRow))
@@ -368,7 +448,7 @@ export function subscribeConversation(
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_loops', filter: f }, (p) => h.onLoop(p.new as LoopRow))
     .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'chat_loops' }, (p) => h.onLoopGone((p.old as { id: string }).id))
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ping_matches', filter: f }, (p) => h.onMatch(p.new as PingMatchRow))
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_members', filter: f }, () => h.onMembers())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_members', filter: f }, (p) => h.onMembers(memberChange(p)))
     .subscribe();
   return () => {
     void sb().removeChannel(channel);
@@ -379,14 +459,14 @@ export function subscribeConversation(
  * Listen for new messages in any of my conversations (and membership changes,
  * e.g. someone accepting a request). Returns an unsubscribe function.
  */
-export function subscribeInbox(uid: string, handlers: { onMessage: (m: MessageRow) => void; onMessageUpdate?: (m: MessageRow) => void; onMembers: () => void; onConversation?: () => void; onStatus?: (s: string) => void }): () => void {
+export function subscribeInbox(uid: string, handlers: { onMessage: (m: MessageRow) => void; onMessageUpdate?: (m: MessageRow) => void; onMembers: (change: MemberChange) => void; onConversation?: () => void; onStatus?: (s: string) => void }): () => void {
   const channel: RealtimeChannel = sb()
-    .channel(`inbox:${uid}`)
+    .channel(`inbox:${uid}:${topicSeq()}`)
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => handlers.onMessage(payload.new as MessageRow))
     // 0006: a deleted (unsent) message, and group renames / photos.
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, (payload) => handlers.onMessageUpdate?.(payload.new as MessageRow))
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversations' }, () => handlers.onConversation?.())
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_members' }, () => handlers.onMembers())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_members' }, (p) => handlers.onMembers(memberChange(p)))
     .subscribe((status) => handlers.onStatus?.(status));
   return () => {
     void sb().removeChannel(channel);

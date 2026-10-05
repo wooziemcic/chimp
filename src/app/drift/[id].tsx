@@ -4,7 +4,6 @@ import { StatusBar } from 'expo-status-bar';
 import { Bookmark, ChevronRight, GalleryHorizontal, Heart, MessageCircle, Play, Share2, X } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, Share, StyleSheet, useWindowDimensions, View, ViewToken } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { duration } from '@/components/drift/DriftTile';
 import { ChimpVideo } from '@/components/media/ChimpVideo';
@@ -13,17 +12,18 @@ import { Img } from '@/components/ui/Img';
 import { EmptyState } from '@/components/ui/misc';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import { isAfterDarkBoard, rankDrift } from '@/graph/surfaces';
+import { driftQueue, isAfterDarkBoard } from '@/graph/surfaces';
 import { useGraphCtx } from '@/hooks/useGraph';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
 import { colors, fonts } from '@/theme';
 import type { DriftItem } from '@/types/models';
 import { compact } from '@/utils/format';
+import { fullscreenTop, MIN_TAP, useDeviceInsets } from '@/components/system/SafeArea';
 
 /**
- * Full-screen Drift: swipe up for the next thing. The order is frozen when
- * you open it (ranking changes as you like things, the pager doesn't jump).
+ * Full-screen Drift: swipe up for the next thing, newest first. The order is
+ * frozen when you open it (the pager never jumps under you).
  * Video is a still preview in the prototype, except the Demo's bundled clip
  * (App Review patch), which plays while it's on screen.
  */
@@ -39,7 +39,7 @@ export default function DriftViewer() {
   const queue = useMemo(() => {
     const start = repo.driftItem(id);
     if (!start) return [];
-    const ranked = rankDrift(ctx).map((x) => x.item);
+    const ranked = driftQueue(ctx);
     return isAfterDarkBoard(repo.board(start.boardId)) ? [start] : ranked.some((d) => d.id === id) ? ranked : [start, ...ranked];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -92,7 +92,8 @@ export default function DriftViewer() {
 }
 
 function DriftPage({ item, width, height, active }: { item: DriftItem; width: number; height: number; active: boolean }) {
-  const insets = useSafeAreaInsets();
+  // Phase 8: full-screen route (covers the App Review banner too) → the phone's real insets.
+  const insets = useDeviceInsets();
   const [muted, setMuted] = useState(true);
   const liked = useChimp((s) => !!s.driftLikes[item.id]);
   const saved = useChimp((s) => !!s.driftSaves[item.id]);
@@ -105,7 +106,7 @@ function DriftPage({ item, width, height, active }: { item: DriftItem; width: nu
   return (
     <View style={{ width, height }}>
       {item.clipSource ? (
-        <ChimpVideo uri={item.clipSource} poster={item.image} active={active} muted={muted} onToggleMute={() => setMuted((m) => !m)} contentFit="cover" style={StyleSheet.absoluteFill} muteStyle={{ top: insets.top + 56, right: 14 }} />
+        <ChimpVideo uri={item.clipSource} poster={item.image} active={active} muted={muted} onToggleMute={() => setMuted((m) => !m)} contentFit="cover" style={StyleSheet.absoluteFill} muteStyle={{ top: fullscreenTop(insets) + MIN_TAP + 4, right: 14 }} />
       ) : (
         <Img uri={item.image} tint="#111" style={StyleSheet.absoluteFill} />
       )}
@@ -120,7 +121,7 @@ function DriftPage({ item, width, height, active }: { item: DriftItem; width: nu
         </View>
       ) : null}
 
-      <View style={[styles.topBar, { top: insets.top + 6 }]}>
+      <View style={[styles.topBar, { top: fullscreenTop(insets) }]}>
         <T v="headline" color={colors.white}>
           Happening
         </T>

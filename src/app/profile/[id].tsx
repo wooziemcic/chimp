@@ -8,6 +8,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { BoardCard } from '@/components/boards/BoardCard';
 import { MoveCard } from '@/components/moves/MoveCard';
 import { ProfileHero } from '@/components/profile/ProfileHero';
+import { RecentPosts } from '@/components/profile/RecentPosts';
 import { InterestGraph, KnownFor, OpenToCard, PromptsRow, StatsRow, WhyMatchCard } from '@/components/profile/ProfileParts';
 import { SparkActions } from '@/components/afterdark/v2/SparkActions';
 import { StoryBubble } from '@/components/stories/StoryBubble';
@@ -327,6 +328,8 @@ export default function ProfileScreen() {
             />
           </View>
         ) : null}
+
+        <RecentPosts personId={user.id} firstName={first} />
 
         {sharedMoves.length ? (
           <View style={{ marginTop: 22 }}>

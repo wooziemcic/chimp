@@ -1,8 +1,8 @@
 import { MoreHorizontal, Pencil, Trash2 } from 'lucide-react-native';
 import { useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, StyleSheet, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useDeviceInsets } from '@/components/system/SafeArea';
 import { Tap } from '@/components/ui/Tap';
 import { editMinutesLeft } from '@/utils/editWindow';
 import { T } from '@/components/ui/Text';
@@ -28,7 +28,7 @@ interface Props {
  * both; this only offers what it will allow.
  */
 export function OwnerMenu({ what, createdAtMs, editable = true, onEdit, onDelete, onDark, size = 18 }: Props) {
-  const insets = useSafeAreaInsets();
+  const insets = useDeviceInsets(); // Phase 8: a Modal sheet covers the whole phone → its real insets
   const [open, setOpen] = useState(false);
   const [editMinutes, setEditMinutes] = useState(0);
   const [confirm, setConfirm] = useState(false);

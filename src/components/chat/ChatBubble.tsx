@@ -11,6 +11,7 @@ import { openMedia } from '@/store/useMediaViewer';
 import { colors } from '@/theme';
 import type { ImageSrc } from '@/types/models';
 import { clockLabel } from '@/utils/format';
+import { type Receipt, receiptLabel } from '@/utils/receipts';
 import type { ReactionChip } from '@/utils/messaging';
 
 interface Props {
@@ -24,6 +25,12 @@ interface Props {
   onLongPress: (m: ChatMsg) => void;
   onRetry: () => void;
   onToggleReaction: (emoji: string) => void;
+  /**
+   * Phase 8: Sent / Delivered / Seen — only on my newest message (one status
+   * line per chat). Groups show "Seen by N"; tapping it says who.
+   */
+  receipt?: Receipt | null;
+  onReceiptPress?: () => void;
 }
 
 /**
@@ -31,7 +38,7 @@ interface Props {
  * Open Loop, Copy, Delete if yours). Reactions sit under the bubble with real
  * counts; a Same Brain is marked "⚡ Same Brain" once, next to its emoji.
  */
-export const ChatBubble = memo(function ChatBubble({ m, mine, sender, quote, reactions, onLongPress, onRetry, onToggleReaction }: Props) {
+export const ChatBubble = memo(function ChatBubble({ m, mine, sender, quote, reactions, onLongPress, onRetry, onToggleReaction, receipt, onReceiptPress }: Props) {
   const failed = m.status === 'failed';
   const pending = !!m.status;
   const group = !!sender;
@@ -101,9 +108,18 @@ export const ChatBubble = memo(function ChatBubble({ m, mine, sender, quote, rea
               Not sent · Tap to retry
             </T>
           </Tap>
+        ) : receipt && receipt.kind === 'seenBy' && onReceiptPress ? (
+          <Tap onPress={onReceiptPress} hitSlop={10} style={{ marginTop: 2, minHeight: 22, justifyContent: 'center' }} accessibilityRole="button" accessibilityLabel={`${receiptLabel(receipt)}. Show who`} testID="receipt">
+            <T v="caption" color={colors.inkFaint} style={{ fontSize: 11 }}>
+              {`${clockLabel(m.createdAt)} · `}
+              <T v="caption" weight="700" color={colors.inkMuted} style={{ fontSize: 11 }}>
+                {receiptLabel(receipt)}
+              </T>
+            </T>
+          </Tap>
         ) : !group || mine || sender?.last ? (
-          <T v="caption" color={colors.inkFaint} style={{ marginTop: 2, fontSize: 11, marginHorizontal: group && !mine ? 12 : 0 }}>
-            {m.status === 'sending' ? 'Sending…' : clockLabel(m.createdAt)}
+          <T v="caption" color={colors.inkFaint} style={{ marginTop: 2, fontSize: 11, marginHorizontal: group && !mine ? 12 : 0 }} testID={receipt ? 'receipt' : undefined}>
+            {m.status === 'sending' ? 'Sending…' : receipt ? `${clockLabel(m.createdAt)} · ${receiptLabel(receipt)}` : clockLabel(m.createdAt)}
           </T>
         ) : null}
       </View>

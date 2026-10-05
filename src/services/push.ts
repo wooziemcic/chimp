@@ -140,6 +140,8 @@ interface Pending {
   target: PushTarget;
   for: string | null;
   key: string;
+  /** Phase 8: when it was tapped (ms) — a tap left waiting too long is dropped (see pushGate). */
+  at: number;
 }
 let pending: Pending | null = null;
 const handled = new Set<string>();
@@ -164,7 +166,10 @@ function accept(response: Notifications.NotificationResponse | null) {
   const data = response.notification.request.content.data as PushData;
   const target = routeForPush(data);
   if (!target) return;
-  pending = { target, for: typeof data?.for === 'string' ? data.for : null, key };
+  // When it was TAPPED (now) — not notification.date, whose unit differs by
+  // platform (seconds on iOS, ms on Android). The cold-start response is
+  // cleared after reading, so an old tap can't come back on a later launch.
+  pending = { target, for: typeof data?.for === 'string' ? data.for : null, key, at: Date.now() };
   logEvent('push_opened', { targetType: 'notification', context: { kind: typeof data?.kind === 'string' ? data.kind : 'unknown' } });
   listeners.forEach((l) => l());
 }
@@ -191,6 +196,8 @@ export function installPushHandling(activeConversation: () => string | undefined
   // The tap that opened the app from a cold start.
   try {
     accept(Notifications.getLastNotificationResponse());
+    // Phase 8: consume it, so the NEXT cold launch (without a tap) doesn't reopen that old chat.
+    void Notifications.clearLastNotificationResponseAsync().catch(() => {});
   } catch {
     // older binaries: the listener below still catches warm taps
   }

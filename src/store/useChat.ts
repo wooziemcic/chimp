@@ -8,6 +8,14 @@
  *   open            → marks the conversation read, loads its reactions, Same
  *                     Brain, Open Loops, Ping matches and members, and listens
  *                     for live changes to them while it's open
+ *
+ * Phase 8 receipts (0011), all in SERVER time:
+ *   Seen       mark_read_upto(newest message on screen) — only while the chat is
+ *              open AND the app is in the foreground (debounced per chat)
+ *   Delivered  mark_delivered() after the inbox syncs or a message arrives live
+ *              (only when something new from someone else came in; never on render)
+ *   Receipts   chat_receipts(cid) while a chat is open; refreshed when a member's
+ *              cursor changes (Realtime), on open, on reconnect / foreground
  *   stop()          → on sign-out / account switch (nothing leaks between accounts)
  *
  * Final messaging patch: one store, two backends (services/chatApi.ts).
@@ -18,7 +26,7 @@
 import { AppState } from 'react-native';
 import { create } from 'zustand';
 
-import type { ConversationRow, GroupRole, LoopPatch, LoopRow, MemberRow, MemberStatus, MessageRow, PingKind, PingMatchRow, PingRow, ReactionRow, SameBrainRow } from '@/services/backend/chat';
+import type { ConversationRow, GroupRole, LoopPatch, LoopRow, MemberChange, MemberRow, MemberStatus, MessageRow, PingKind, PingMatchRow, PingRow, ReactionRow, ReceiptRow, SameBrainRow } from '@/services/backend/chat';
 import { fetchPeople } from '@/services/backend/content';
 import { toUser } from '@/services/backend/mappers';
 import { kindOf } from '@/services/backend/errors';
@@ -28,6 +36,7 @@ import { repo } from '@/services/repository';
 import type { User } from '@/types/models';
 import { onAccountChange } from './useSession';
 import { logEvent } from '@/services/analytics';
+import { serverMicros } from '@/utils/receipts';
 
 export interface ChatMsg {
   id: string;
@@ -128,6 +137,11 @@ interface ChatState {
   flash?: { key: string; conversationId: string; messageId: string; emoji: string };
   /** A fresh Ping match to reveal, per conversation (until dismissed). */
   reveal: Record<string, string | undefined>;
+  /**
+   * Phase 8: receipts for open conversations (server-filtered). Missing =
+   * not loaded yet; null = this server has no receipts (show "Sent" only).
+   */
+  receipts: Record<string, ReceiptRow[] | null>;
 
   start: (uid: string, api?: ChatApi) => Promise<void>;
   stop: () => void;
@@ -185,6 +199,7 @@ const EMPTY = {
   demo: false,
   flash: undefined,
   reveal: {},
+  receipts: {},
 };
 
 let api: ChatApi = realChatApi;
@@ -197,6 +212,20 @@ const convSubs = new Map<string, () => void>();
 const flashed = new Set<string>();
 /** Ping matches already revealed / dismissed on this device. */
 const dismissedMatches = new Set<string>();
+
+/** Phase 8: receipt bookkeeping (all cleared on stop(), so nothing crosses accounts). */
+const readTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const receiptTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Newest "from someone else" time (server µs) per conversation that we've already acknowledged as delivered. */
+const deliveredAck = new Map<string, number>();
+let deliverTimer: ReturnType<typeof setTimeout> | null = null;
+/** status|role|joined per member, to tell a cursor-only change from a real membership change. */
+const memberSig = new Map<string, string>();
+const READ_DEBOUNCE_MS = 300;
+const DELIVER_DEBOUNCE_MS = 600;
+const RECEIPTS_DEBOUNCE_MS = 250;
+
+const sigOf = (r: Partial<MemberRow> | undefined) => (r ? `${r.status ?? '?'}|${r.role ?? '?'}|${r.joined_at ?? '?'}` : '');
 
 const DAY = 24 * 3600 * 1000;
 const SAME_BRAIN_FRESH_MS = 15 * 1000;
@@ -331,6 +360,94 @@ export const useChat = create<ChatState>((set, get) => {
     }, 250);
   };
 
+  // ── Phase 8: Seen / Delivered / receipts ──────────────────────────────
+  /** I can SEE this chat right now: it's the open one and the app is in the foreground. */
+  const canSee = (cid: string) => get().activeId === cid && AppState.currentState === 'active';
+
+  /** The newest message the server has confirmed in this chat (what's on screen at the bottom). */
+  const newestServerId = (cid: string) => {
+    const list = get().messages[cid] ?? [];
+    for (let i = list.length - 1; i >= 0; i--) if (!list[i].status) return list[i].id;
+    return undefined;
+  };
+
+  const flushSeen = (cid: string) => {
+    const t = readTimers.get(cid);
+    if (t) clearTimeout(t);
+    readTimers.delete(cid);
+    if (!canSee(cid) || !get().uid) return;
+    const upto = newestServerId(cid);
+    if (!upto) return;
+    const using = api;
+    void using.markReadUpto(cid, upto).catch((e) => trace('mark seen failed', String(e)));
+  };
+
+  /** Mark seen up to the newest message on screen — debounced, and only if I can see it. */
+  const markSeen = (cid: string) => {
+    if (!canSee(cid)) return;
+    const t = readTimers.get(cid);
+    if (t) clearTimeout(t);
+    readTimers.set(cid, setTimeout(() => flushSeen(cid), READ_DEBOUNCE_MS));
+  };
+
+  /**
+   * Tell the server this app has received what's in the inbox. One call for
+   * all chats, and only when a chat has something newer from someone else
+   * than we last acknowledged — so reloads and renders never write.
+   */
+  const ackDelivered = () => {
+    const uid = get().uid;
+    if (!uid) return;
+    const fresh = Object.values(get().conversations).filter((c) => c.lastSender && c.lastSender !== uid && c.lastAt && serverMicros(c.lastAt) > (deliveredAck.get(c.id) ?? 0));
+    if (!fresh.length) return;
+    if (deliverTimer) clearTimeout(deliverTimer);
+    deliverTimer = setTimeout(() => {
+      deliverTimer = null;
+      if (get().uid !== uid) return;
+      const using = api;
+      void using
+        .markDelivered(null)
+        .then(() => {
+          if (get().uid !== uid || api !== using) return;
+          for (const c of fresh) deliveredAck.set(c.id, serverMicros(c.lastAt));
+        })
+        .catch((e) => trace('mark delivered failed', String(e)));
+    }, DELIVER_DEBOUNCE_MS);
+  };
+
+  /** Load receipts for an open Messages chat (never a Vibe: those aren't in `conversations`). */
+  const loadReceipts = (cid: string, delay = RECEIPTS_DEBOUNCE_MS) => {
+    if (!get().conversations[cid]) return;
+    const t = receiptTimers.get(cid);
+    if (t) clearTimeout(t);
+    const uid = get().uid;
+    receiptTimers.set(
+      cid,
+      setTimeout(() => {
+        receiptTimers.delete(cid);
+        if (get().uid !== uid || !convSubs.has(cid)) return;
+        const using = api;
+        void using
+          .fetchReceipts(cid)
+          .then((rows) => {
+            if (get().uid !== uid || api !== using) return;
+            set({ receipts: { ...get().receipts, [cid]: rows } });
+          })
+          .catch((e) => trace('receipts failed', String(e)));
+      }, delay),
+    );
+  };
+
+  /** Did this member event change membership (status / role / joined), or only a cursor? */
+  const membershipChanged = (cid: string | undefined, change: MemberChange) => {
+    const r = change.row;
+    if (change.event !== 'UPDATE' || !r?.user_id || !(cid ?? r.conversation_id)) return true;
+    const key = `${cid ?? r.conversation_id}|${r.user_id}`;
+    const before = memberSig.get(key);
+    memberSig.set(key, sigOf(r));
+    return before !== sigOf(r);
+  };
+
   const onRealtime = (row: MessageRow) => {
     const uid = get().uid;
     if (!uid) return;
@@ -344,7 +461,7 @@ export const useChat = create<ChatState>((set, get) => {
       // Phase 7A: a Vibe's message belongs to After Dark (it tracks its own unread).
       if (isForeign(row)) {
         if (m.mediaId) void hydrateMedia(m.conversationId);
-        if (!mine && viewing) void api.markRead(m.conversationId).catch(() => {});
+        if (!mine && viewing) markSeen(m.conversationId); // my own unread cursor only: Vibes have no receipts
         return;
       }
       void get().loadConversations(); // a new conversation (a Message Request, or I was added to a group) — fetch it
@@ -353,7 +470,8 @@ export const useChat = create<ChatState>((set, get) => {
     bumpSummary(m, !mine && !viewing);
     if (m.mediaId) void hydrateMedia(m.conversationId);
     if (!mine) void ensurePeople([m.senderId]);
-    if (!mine && viewing) void api.markRead(m.conversationId).catch(() => {});
+    if (!mine && viewing) markSeen(m.conversationId);
+    else if (!mine) ackDelivered(); // it reached this app: Delivered (not Seen)
   };
 
   const onMessageUpdate = (row: MessageRow) => {
@@ -388,6 +506,7 @@ export const useChat = create<ChatState>((set, get) => {
   const refresh = {
     members: async (cid: string) => {
       const members = await api.fetchMembers(cid);
+      for (const m of members) memberSig.set(`${cid}|${m.user_id}`, sigOf(m));
       setExtras(cid, { members });
       void ensurePeople(members.map((m) => m.user_id));
     },
@@ -436,9 +555,17 @@ export const useChat = create<ChatState>((set, get) => {
         noteMatches(cid, [m]);
         void refresh.pings(cid).catch(() => {}); // my own Ping may be part of it now
       },
-      onMembers: () => {
-        void refresh.members(cid).catch(() => {});
-        reloadSoon();
+      onMembers: (change) => {
+        // Phase 8: a read / delivery cursor moved → just the receipts. Only a
+        // real membership change (joined, left, accepted, role) reloads more.
+        const known = extrasOf(cid).members.find((x) => x.user_id === change.row?.user_id);
+        const r = change.row;
+        const cursorOnly = change.event === 'UPDATE' && !!known && !!r && r.status === known.status && r.role === known.role && r.joined_at === known.joined_at;
+        if (!cursorOnly) {
+          void refresh.members(cid).catch(() => {});
+          reloadSoon();
+        }
+        loadReceipts(cid);
       },
     });
     convSubs.set(cid, unsub);
@@ -513,13 +640,26 @@ export const useChat = create<ChatState>((set, get) => {
         onMessage: onRealtime,
         onMessageUpdate,
         onConversation: reloadSoon,
-        onMembers: reloadSoon,
+        onMembers: (change) => {
+          // Phase 8: someone reading (a cursor-only change) doesn't reload my
+          // whole chat list. My own cursor moving while I'm not in that chat
+          // (another device read it) does: my unread count changed.
+          const r = change.row;
+          const changed = membershipChanged(undefined, change);
+          if (changed) return reloadSoon();
+          if (r?.user_id === uid && r.conversation_id && r.conversation_id !== get().activeId) reloadSoon();
+        },
         onStatus: (s) => {
           trace('channel', s);
           if (get().uid !== uid) return;
           set({ live: s === 'SUBSCRIBED' ? 'live' : s === 'CHANNEL_ERROR' || s === 'TIMED_OUT' ? 'error' : get().live });
-          // (Re)connected: catch up on anything missed while offline.
-          if (s === 'SUBSCRIBED') void get().loadConversations();
+          // (Re)connected: catch up on anything missed while offline — the list,
+          // and the open chat (its messages, Seen and receipts).
+          if (s === 'SUBSCRIBED') {
+            void get().loadConversations();
+            const active = get().activeId;
+            if (active) void get().open(active);
+          }
         },
       });
       // Coming back to the app: catch up once (Realtime may have been paused in the background). No polling.
@@ -540,6 +680,14 @@ export const useChat = create<ChatState>((set, get) => {
       for (const cid of [...convSubs.keys()]) unsubscribeOpen(cid);
       if (reloadTimer) clearTimeout(reloadTimer);
       reloadTimer = null;
+      for (const t of readTimers.values()) clearTimeout(t);
+      readTimers.clear();
+      for (const t of receiptTimers.values()) clearTimeout(t);
+      receiptTimers.clear();
+      if (deliverTimer) clearTimeout(deliverTimer);
+      deliverTimer = null;
+      deliveredAck.clear();
+      memberSig.clear();
       flashed.clear();
       dismissedMatches.clear();
       if (get().uid) trace('stop');
@@ -555,14 +703,16 @@ export const useChat = create<ChatState>((set, get) => {
         const rows = await using.fetchConversations();
         if (get().uid !== uid || api !== using) return;
         const conversations = Object.fromEntries(rows.map((r) => [r.conversation_id, toConversation(r)]));
-        // Keep "I'm reading this right now" at 0 unread.
+        // Keep "I'm reading this right now" at 0 unread — only while I can actually see it
+        // (Phase 8: a chat left open in the background still counts what arrives).
         const active = get().activeId;
-        if (active && conversations[active]) conversations[active] = { ...conversations[active], unread: 0 };
+        if (active && conversations[active] && canSee(active)) conversations[active] = { ...conversations[active], unread: 0 };
         // Conversations I'm no longer in (left / removed / deleted): drop what we had.
         for (const cid of Object.keys(get().conversations)) if (!conversations[cid]) forget(cid);
         const direct = rows.filter((r) => (r.kind ?? 'direct') === 'direct' && r.other_id);
         set({ conversations, byPerson: Object.fromEntries(direct.map((r) => [r.other_id!, r.conversation_id])), loaded: true, error: undefined });
         void ensurePeople([...direct.map((r) => r.other_id), ...rows.map((r) => r.last_sender)]);
+        ackDelivered(); // the inbox reached this app: Delivered for anything new from others
       } catch (e) {
         set({ error: errText(e), loaded: true });
       }
@@ -579,7 +729,7 @@ export const useChat = create<ChatState>((set, get) => {
     open: async (conversationId) => {
       set({ activeId: conversationId });
       const c = get().conversations[conversationId];
-      if (c?.unread) set({ conversations: { ...get().conversations, [c.id]: { ...c, unread: 0 } } });
+      if (c?.unread && canSee(conversationId)) set({ conversations: { ...get().conversations, [c.id]: { ...c, unread: 0 } } });
       subscribeOpen(conversationId);
       void get().loadExtras(conversationId);
       try {
@@ -592,15 +742,22 @@ export const useChat = create<ChatState>((set, get) => {
         set({ messages: { ...get().messages, [conversationId]: merged } });
         void hydrateMedia(conversationId);
         void ensurePeople(confirmed.map((m) => m.senderId));
-        await api.markRead(conversationId);
+        // Phase 8: Seen only if I'm actually looking (foreground), up to what's on screen.
+        markSeen(conversationId);
+        loadReceipts(conversationId, 0);
       } catch (e) {
         set({ error: errText(e) });
       }
     },
 
     close: (conversationId) => {
+      // It was on screen until now: don't lose a pending Seen by leaving quickly.
+      if (readTimers.has(conversationId)) flushSeen(conversationId);
       if (get().activeId === conversationId) set({ activeId: undefined });
       unsubscribeOpen(conversationId);
+      const t = receiptTimers.get(conversationId);
+      if (t) clearTimeout(t);
+      receiptTimers.delete(conversationId);
     },
 
     loadExtras: async (cid) => {

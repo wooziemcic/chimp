@@ -13,10 +13,10 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { FlatList, Modal, StyleSheet, useWindowDimensions, View, type ViewToken } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring, withTiming } from 'react-native-reanimated';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { scheduleOnRN } from 'react-native-worklets';
 
 import { ChimpVideo } from '@/components/media/ChimpVideo';
+import { FullscreenTopBar, fullscreenTop, MIN_TAP, useDeviceInsets } from '@/components/system/SafeArea';
 import { Img } from '@/components/ui/Img';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
@@ -59,6 +59,7 @@ export function MediaViewer() {
   }, []);
 
   const frameH = height;
+  const deviceInsets = useDeviceInsets();
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={close} statusBarTranslucent supportedOrientations={['portrait']}>
       <GestureHandlerRootView style={styles.root}>
@@ -84,35 +85,36 @@ export function MediaViewer() {
             }
           />
         ) : null}
-        <SafeAreaView edges={['top', 'bottom']} style={StyleSheet.absoluteFill} pointerEvents="box-none">
-          <View style={styles.top} pointerEvents="box-none">
-            {items.length > 1 ? (
+        {/* Phase 8: controls from the phone's real insets (a Modal can report 0 for a frame, and
+            the App Review frame zeroes the top) — never under the status bar or Dynamic Island. */}
+        <FullscreenTopBar
+          left={
+            items.length > 1 ? (
               <View style={styles.count}>
                 <T v="caption" weight="700" color="#fff">{`${index + 1} / ${items.length}`}</T>
               </View>
-            ) : (
-              <View />
-            )}
-            <Tap onPress={close} style={styles.close} accessibilityLabel="Close">
+            ) : null
+          }
+          right={
+            <Tap onPress={close} style={styles.close} accessibilityLabel="Close" testID="media-viewer-close" hitSlop={8}>
               <X size={24} color="#fff" />
             </Tap>
+          }
+        />
+        {meta.caption || meta.authorName ? (
+          <View style={[styles.meta, { paddingBottom: 16 + deviceInsets.bottom }]} pointerEvents="none">
+            {meta.caption ? (
+              <T v="callout" weight="700" color="#fff" numberOfLines={3}>
+                {meta.caption}
+              </T>
+            ) : null}
+            {meta.authorName ? (
+              <T v="footnote" color="rgba(255,255,255,0.7)" style={{ marginTop: 4 }}>
+                {[meta.authorName, meta.context].filter(Boolean).join(' · ')}
+              </T>
+            ) : null}
           </View>
-          <View style={{ flex: 1 }} pointerEvents="none" />
-          {meta.caption || meta.authorName ? (
-            <View style={styles.meta} pointerEvents="none">
-              {meta.caption ? (
-                <T v="callout" weight="700" color="#fff" numberOfLines={3}>
-                  {meta.caption}
-                </T>
-              ) : null}
-              {meta.authorName ? (
-                <T v="footnote" color="rgba(255,255,255,0.7)" style={{ marginTop: 4 }}>
-                  {[meta.authorName, meta.context].filter(Boolean).join(' · ')}
-                </T>
-              ) : null}
-            </View>
-          ) : null}
-        </SafeAreaView>
+        ) : null}
       </GestureHandlerRootView>
     </Modal>
   );
@@ -133,15 +135,21 @@ function ViewerVideo({ item, width, height, active, muted, onToggleMute, onDismi
     });
   const style = useAnimatedStyle(() => ({ transform: [{ translateY: dragY.get() }], opacity: 1 - Math.min(0.6, Math.abs(dragY.get()) / 500) }));
   const aspect = item.aspect && item.aspect > 0 ? item.aspect : 9 / 16;
+  // Phase 8: a clip has its own controls (mute, progress), so it fits between
+  // the top bar and the home indicator instead of running under either.
+  const insets = useDeviceInsets();
+  const topReserve = fullscreenTop(insets) + MIN_TAP + 8;
+  const bottomReserve = insets.bottom + 8;
+  const room = Math.max(200, height - topReserve - bottomReserve);
   let w = width;
   let h = width / aspect;
-  if (h > height) {
-    h = height;
-    w = height * aspect;
+  if (h > room) {
+    h = room;
+    w = room * aspect;
   }
   return (
     <GestureDetector gesture={pan}>
-      <View style={{ width, height, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ width, height, alignItems: 'center', justifyContent: 'center', paddingTop: topReserve, paddingBottom: bottomReserve }}>
         <Animated.View style={[{ width: w, height: h }, style]}>
           <ChimpVideo uri={item.uri} poster={item.video?.poster} active={active} muted={muted} onToggleMute={onToggleMute} style={{ width: w, height: h }} muteStyle={{ bottom: 14, right: 14 }} />
         </Animated.View>
@@ -318,8 +326,7 @@ const ZoomableImage = memo(function ZoomableImage({
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#000' },
-  top: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingTop: 4 },
-  close: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.14)' },
+  close: { width: MIN_TAP, height: MIN_TAP, borderRadius: MIN_TAP / 2, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.14)' },
   count: { height: 28, paddingHorizontal: 10, borderRadius: 14, justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.14)' },
-  meta: { paddingHorizontal: 20, paddingBottom: 16, paddingTop: 12, backgroundColor: 'rgba(0,0,0,0.35)' },
+  meta: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 20, paddingTop: 12, backgroundColor: 'rgba(0,0,0,0.35)' },
 });

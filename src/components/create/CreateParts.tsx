@@ -22,14 +22,38 @@ export function closeComposer(fallback: '/buzz' | '/happening' | '/boards' = '/b
   else router.replace(fallback);
 }
 
-export function Composer({ title, action, onAction, disabled, busy, error, children }: { title: string; action: string; onAction: () => void; disabled?: boolean; busy?: boolean; error?: string | null; children: ReactNode }) {
+export function Composer({
+  title,
+  action,
+  onAction,
+  disabled,
+  busy,
+  error,
+  children,
+  onCancel,
+  cancelLabel = 'Cancel',
+  status,
+}: {
+  title: string;
+  action: string;
+  onAction: () => void;
+  disabled?: boolean;
+  busy?: boolean;
+  error?: string | null;
+  children: ReactNode;
+  /** Posting reliability: the composer decides what Cancel does (keep / discard / stop). */
+  onCancel?: () => void;
+  cancelLabel?: string;
+  /** Progress / failure / cancel choices, shown above the form. */
+  status?: ReactNode;
+}) {
   const insets = useSafeAreaInsets();
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: colors.surface }}>
       <View style={[styles.head, { paddingTop: Platform.OS === 'ios' ? 14 : insets.top + 8 }]}>
-        <Tap onPress={() => closeComposer()} style={styles.headBtn} accessibilityLabel="Cancel">
+        <Tap onPress={onCancel ?? (() => closeComposer())} style={styles.headBtn} accessibilityLabel={cancelLabel}>
           <T v="body" color={colors.ink2}>
-            Cancel
+            {cancelLabel}
           </T>
         </Tap>
         <T v="headline" style={{ flex: 1, textAlign: 'center' }}>
@@ -40,6 +64,7 @@ export function Composer({ title, action, onAction, disabled, busy, error, child
         </Tap>
       </View>
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 40 }} keyboardShouldPersistTaps="handled">
+        {status}
         {error ? (
           <View style={styles.error}>
             <T v="footnote" color={colors.danger}>

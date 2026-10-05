@@ -10,6 +10,7 @@ import { ConnectionRequests } from '@/components/profile/ConnectionRequests';
 import { MatchCard } from '@/components/profile/MatchCard';
 import { InterestGraph, KnownFor, OpenLoopsPanel, OpenToCard, PromptsRow, StatsRow, AgentBriefingCard } from '@/components/profile/ProfileParts';
 import { ProfileHero } from '@/components/profile/ProfileHero';
+import { RecentPosts } from '@/components/profile/RecentPosts';
 import { BoardStackCard } from '@/components/profile/YouCards';
 import { DatingSummary, Lately, RelationTiles } from '@/components/profile/YouParts';
 import { IconButton } from '@/components/ui/IconButton';
@@ -196,6 +197,8 @@ export default function YouScreen() {
             <BoardStackCard title="Your Boards" boards={mine} countLabel={(b) => `${b.memberCount} ${b.memberCount === 1 ? 'member' : 'members'} · ${postsLabel(repo.boardPostCount(b.id))}`} onSeeAll={() => router.navigate('/boards')} empty="You haven’t joined a World yet." />
           ) : null}
         </View>
+
+        <RecentPosts personId={me.id} firstName={(profile.displayName ?? me.displayName).split(' ')[0]} own />
 
         <View style={styles.gap}>
           <OpenLoopsPanel loops={s.openLoops} />

@@ -27,6 +27,7 @@ import { ChallengeCard, NewChallengeSheet } from './ChallengesTab';
 import { PlanCard, PlanSheet } from './PlansTab';
 import { ChoiceRow, DarkSheet, originLine } from './VibeParts';
 import { durationText, MAX_VOICE_MS, useVoiceRecorder, VoiceBubble } from './VoiceNote';
+import { FullscreenTopBar, MIN_TAP } from '@/components/system/SafeArea';
 
 const EMPTY: ChatMsg[] = [];
 
@@ -268,14 +269,20 @@ export const VibeChat = forwardRef<VibeChatHandle, { v: VibeRow; canSend: boolea
       <Modal visible={!!viewing} transparent animationType="fade" onRequestClose={() => setViewing(null)}>
         <View style={styles.viewer} testID="view-once-viewer">
           {viewing ? <Img uri={viewing} contentFit="contain" tint="#000" style={StyleSheet.absoluteFill} /> : null}
-          <View style={styles.viewerTop}>
-            <T v="footnote" weight="700" color="#fff">
-              View once · it disappears when you close it
-            </T>
-            <Tap onPress={() => setViewing(null)} style={styles.viewerX} accessibilityLabel="Close photo" testID="view-once-close">
-              <X size={20} color="#fff" />
-            </Tap>
-          </View>
+          {/* Phase 8: placed from the phone's real insets (was a fixed top: 54, which sat
+              inside the Dynamic Island / status bar on 59–62-pt phones). */}
+          <FullscreenTopBar
+            left={
+              <T v="footnote" weight="700" color="#fff" numberOfLines={2} style={{ flexShrink: 1 }}>
+                View once · it disappears when you close it. Screenshots can’t be blocked.
+              </T>
+            }
+            right={
+              <Tap onPress={() => setViewing(null)} style={styles.viewerX} accessibilityLabel="Close photo" testID="view-once-close" hitSlop={8}>
+                <X size={20} color="#fff" />
+              </Tap>
+            }
+          />
         </View>
       </Modal>
     </KeyboardAvoidingView>
@@ -535,6 +542,5 @@ const styles = StyleSheet.create({
   reply: { flexDirection: 'row', alignItems: 'center', marginHorizontal: 12, marginTop: 6, paddingLeft: 12, paddingVertical: 4, borderRadius: 14, backgroundColor: ad.pinkSoft },
   react: { width: 46, height: 46, borderRadius: 23, backgroundColor: ad.glass, alignItems: 'center', justifyContent: 'center' },
   viewer: { flex: 1, backgroundColor: '#000' },
-  viewerTop: { position: 'absolute', top: 54, left: 16, right: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  viewerX: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
+  viewerX: { width: MIN_TAP, height: MIN_TAP, borderRadius: MIN_TAP / 2, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
 });

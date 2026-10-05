@@ -5,8 +5,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Lock } from 'lucide-react-native';
 import type { ReactNode } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, View, type ViewStyle } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useDeviceInsets } from '@/components/system/SafeArea';
 import { Avatar } from '@/components/ui/Avatar';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
@@ -107,7 +107,7 @@ export function DarkButton({ label, onPress, tone = 'pink', icon, busy, disabled
 
 /** A dark bottom sheet. */
 export function DarkSheet({ visible, onClose, title, subtitle, children, testID, onDismissed }: { visible: boolean; onClose: () => void; title: string; subtitle?: string; children: ReactNode; testID?: string; onDismissed?: () => void }) {
-  const insets = useSafeAreaInsets();
+  const insets = useDeviceInsets(); // Phase 8: a Modal sheet covers the whole phone → its real insets
   return (
     // onDismiss (iOS) fires once the sheet is fully gone: the moment it's safe to present the photo picker.
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} onDismiss={onDismissed}>

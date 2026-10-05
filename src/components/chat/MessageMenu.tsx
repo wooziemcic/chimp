@@ -2,8 +2,8 @@ import * as Clipboard from 'expo-clipboard';
 import { Copy, CornerUpLeft, Repeat, Trash2 } from 'lucide-react-native';
 import { type ReactNode, useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, StyleSheet, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useDeviceInsets } from '@/components/system/SafeArea';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { REACTIONS } from '@/services/backend/chat';
@@ -24,7 +24,7 @@ interface Props {
 
 /** Long-press on a message: React · Reply · Turn into Open Loop · Copy · Delete (yours). */
 export function MessageMenu({ m, mine, myReactions, onClose, onReact, onReply, onLoop, onDelete }: Props) {
-  const insets = useSafeAreaInsets();
+  const insets = useDeviceInsets(); // Phase 8: a Modal sheet covers the whole phone → its real insets
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
