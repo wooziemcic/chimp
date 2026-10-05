@@ -1,27 +1,30 @@
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useScrollToTop } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ChevronRight, Sparkles } from 'lucide-react-native';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { BuzzCard } from '@/components/buzz/BuzzCard';
 import { DriftPager } from '@/components/drift/DriftPager';
 import { ComposeRow, CreateButton } from '@/components/create/CreateButton';
+import { GRID_GAP, PostTile } from '@/components/profile/RecentPosts';
 import { Button, EmptyState } from '@/components/ui/misc';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Segmented } from '@/components/ui/Segmented';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import { type BuzzTab, type FeedEntry, buildDriftFeed, buzzFeed, isAfterDarkRef } from '@/graph/surfaces';
+import { type BuzzTab, type FeedEntry, type ProfilePost, buildDriftFeed, buzzEngagement, buzzFeed, followingGridFor, isAfterDarkRef } from '@/graph/surfaces';
 import { useGraphCtx, useUnseenChanges } from '@/hooks/useGraph';
 import { useTabBarSpace } from '@/hooks/useLayout';
 import { useDataset } from '@/services/dataset';
 import { useSession } from '@/store/useSession';
 import { colors, radius } from '@/theme';
-import { packRows } from '@/utils/buzzRows';
+import type { BuzzItem } from '@/types/models';
+import { engagementScore } from '@/utils/feedOrder';
 
 type Tab = BuzzTab | 'drift';
+type Row = { key: string; item: BuzzItem } | { key: string; tiles: ProfilePost[] };
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'forYou', label: 'For You' },
@@ -35,12 +38,13 @@ const TABS: { id: Tab; label: string }[] = [
  * Chimp's conversation layer: thoughts, takes, photos, videos, polls and
  * (demo) news. A World is optional context, never required.
  *
- * Four sub-tabs, each with its own ordering (graph/surfaces → buzzFeed,
- * rules in utils/feedOrder):
- *   For You    newest first (created_at desc). No engagement ranking.
- *   Following  people and Worlds you follow, newest first.
- *   Trending   likes + comments, with a small recency boost (engagementScore).
- *   Drift      full-screen photos and videos, newest first.
+ * Four sub-tabs, each with its own ordering AND look (graph/surfaces, rules
+ * in utils/feedOrder):
+ *   For You    full-width feed, newest first (created_at desc).
+ *   Following  3-column grid of posts from people you follow, newest first.
+ *   Trending   full-width feed, likes + comments with a small recency boost.
+ *   Drift      immersive full-screen photos and videos, newest first.
+ * Tapping Buzz in the tab bar while you're on it scrolls back to the top.
  */
 export default function BuzzScreen() {
   // `/buzz?tab=drift` (e.g. an old Drift link) opens straight into that sub-tab.
@@ -57,7 +61,6 @@ export default function BuzzScreen() {
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const full = width - 32;
-  const half = Math.floor((full - 10) / 2);
   const worldUpdates = useUnseenChanges().filter((c) => !isAfterDarkRef(c.ref) && (c.type === 'BOARD_ACTIVITY' || c.type === 'STORY_UPDATE' || c.type === 'NEW_CONNECTION_ACTIVITY'));
 
   const syncing = useSession((s) => s.syncing);
@@ -74,8 +77,42 @@ export default function BuzzScreen() {
     setOrderAt(Date.now());
   };
   // The whole list is ordered first, then shown row by row, so the order holds
-  // all the way down (not just on the first screen).
-  const rows = useMemo(() => (tab === 'drift' ? [] : packRows(buzzFeed(ctx, tab, orderAt))), [ctx, tab, orderAt]);
+  // all the way down (not just on the first screen). For You / Trending: one
+  // full-width card per row. Following: rows of three tiles.
+  const cols = 3;
+  const tile = Math.floor((width - 32 - GRID_GAP * (cols - 1)) / cols);
+  const rows = useMemo<Row[]>(() => {
+    if (tab === 'drift') return [];
+    if (tab === 'following') {
+      const tiles = followingGridFor(ctx, orderAt);
+      const out: Row[] = [];
+      for (let i = 0; i < tiles.length; i += cols) {
+        const part = tiles.slice(i, i + cols);
+        out.push({ key: part.map((t) => t.key).join('+'), tiles: part });
+      }
+      return out;
+    }
+    return buzzFeed(ctx, tab, orderAt).map((b) => ({ key: b.id, item: b }));
+  }, [ctx, tab, orderAt]);
+
+  // Dev diagnostics: what Trending computed (ids and numbers only, never content).
+  useEffect(() => {
+    if (!__DEV__ || tab !== 'trending') return;
+    const top = rows.slice(0, 8).flatMap((r) => ('item' in r ? [buzzEngagement(ctx, r.item, orderAt)] : []));
+    console.log('[chimp:trending]', JSON.stringify(top.map((e) => ({ id: e.id.slice(0, 8), ageH: +((orderAt - e.createdMs) / 3_600_000).toFixed(1), likes: e.likes, comments: e.comments, score: +engagementScore(e.likes, e.comments, (orderAt - e.createdMs) / 3_600_000).toFixed(2) }))));
+  }, [tab, rows, ctx, orderAt]);
+
+  // Tapping Buzz in the tab bar while already on Buzz: back to the top of
+  // whichever surface is showing (feed, grid or Drift). Nothing reloads.
+  const listRef = useRef<FlatList<Row>>(null);
+  const driftRef = useRef<FlatList<FeedEntry>>(null);
+  const toTop = useRef({
+    scrollToTop: () => {
+      listRef.current?.scrollToOffset({ offset: 0, animated: true });
+      driftRef.current?.scrollToOffset({ offset: 0, animated: true });
+    },
+  });
+  useScrollToTop(toTop);
 
   // Trending ranks by likes and comments: keep the real totals current while you're looking at it.
   useEffect(() => {
@@ -106,7 +143,7 @@ export default function BuzzScreen() {
         <StatusBar style="light" />
         <View style={{ flex: 1 }} onLayout={(e) => setDriftH(Math.round(e.nativeEvent.layout.height))}>
           {driftH > 0 && driftEntries.length ? (
-            <DriftPager entries={driftEntries} width={width} height={driftH} topInset={insets.top + 64} bottomInset={bottom - 16} />
+            <DriftPager listRef={driftRef} entries={driftEntries} width={width} height={driftH} topInset={insets.top + 64} bottomInset={bottom - 16} />
           ) : driftH > 0 ? (
             <View style={[styles.driftEmpty, { paddingTop: insets.top + 80 }]}>
               <EmptyState
@@ -130,11 +167,13 @@ export default function BuzzScreen() {
     <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg }}>
       <StatusBar style="dark" />
       <FlatList
+        ref={listRef}
+        testID={`buzz-list-${tab}`}
         data={loading ? [] : rows}
         keyExtractor={(r) => r.key}
-        initialNumToRender={6}
+        initialNumToRender={tab === 'following' ? 8 : 6}
         windowSize={7}
-        contentContainerStyle={{ paddingBottom: bottom, gap: 10 }}
+        contentContainerStyle={{ paddingBottom: bottom, gap: tab === 'following' ? GRID_GAP : 10 }}
         refreshing={real ? syncing && !loading : false}
         onRefresh={
           real
@@ -160,22 +199,26 @@ export default function BuzzScreen() {
             ) : null}
           </View>
         }
-        renderItem={({ item: row }) => (
-          <View style={styles.row}>
-            {row.items.length === 2 ? (
-              row.items.map((it) => <BuzzCard key={it.id} item={it} width={half} />)
-            ) : (
-              <BuzzCard item={row.items[0]} width={full} />
-            )}
-          </View>
-        )}
+        renderItem={({ item: row }) =>
+          'tiles' in row ? (
+            <View style={styles.gridRow} testID="following-row">
+              {row.tiles.map((t) => (
+                <PostTile key={t.key} post={t} size={tile} showAuthor testPrefix="following-tile" />
+              ))}
+            </View>
+          ) : (
+            <View style={styles.row}>
+              <BuzzCard item={row.item} width={full} />
+            </View>
+          )
+        }
         ListEmptyComponent={
           loading ? (
             <BuzzSkeleton width={full} />
           ) : (
             <EmptyState
               title={tab === 'following' ? 'Nothing from your people yet' : real ? 'Buzz is quiet' : 'Quiet for now'}
-              body={tab === 'following' ? 'Follow people or join Worlds and their conversation shows up here.' : real ? 'Be the first: say something. A World is optional.' : 'Check back soon.'}
+              body={tab === 'following' ? 'Follow people and their posts show up here.' : real ? 'Be the first: say something. A World is optional.' : 'Check back soon.'}
             />
           )
         }
@@ -204,5 +247,6 @@ const styles = StyleSheet.create({
   skel: { borderRadius: radius.xl, backgroundColor: colors.surface, padding: 16, opacity: 0.8 },
   skelLine: { height: 12, borderRadius: 6, width: '85%', backgroundColor: colors.surfaceMuted },
   row: { flexDirection: 'row', gap: 10, paddingHorizontal: 16, alignItems: 'flex-start' },
+  gridRow: { flexDirection: 'row', gap: GRID_GAP, paddingHorizontal: 16 },
   updates: { flexDirection: 'row', alignItems: 'center', marginHorizontal: 16, marginTop: 12, minHeight: 44, paddingHorizontal: 12, borderRadius: radius.lg, backgroundColor: colors.accentSoft },
 });

@@ -519,6 +519,7 @@ export interface ProfilePost {
   key: string;
   kind: 'buzz' | 'drift';
   id: string;
+  authorId?: string;
   createdMs: number;
   /** Photo, or a video's poster frame. None = a text card. */
   thumb?: ImageSrc;
@@ -538,15 +539,32 @@ export interface ProfilePost {
  */
 export function recentPostsFor(ctx: GraphContext, personId: string, now = Date.now()): ProfilePost[] {
   if (!personId || (!repo.isMe(personId) && ctx.s.blocked[personId])) return [];
+  return gridPosts(ctx, (a) => a === personId, now);
+}
+
+/**
+ * Buzz → Following: posts (Buzz and World photos / videos) only from people you
+ * follow or are connected with, newest first. Same visibility rules as a
+ * profile: nobody you blocked, no After Dark, no World you can't see. Never
+ * your own posts (they're on You and in For You).
+ */
+export function followingGridFor(ctx: GraphContext, now = Date.now()): ProfilePost[] {
+  const { s } = ctx;
+  return gridPosts(ctx, (a) => !!a && !repo.isMe(a) && !s.blocked[a] && !!(s.following[a] || s.connections[a]), now);
+}
+
+/** Grid tiles for posts whose author passes `authorOk`, newest first (one tile per canonical item). */
+function gridPosts(ctx: GraphContext, authorOk: (authorId: string | undefined) => boolean, now: number): ProfilePost[] {
   const buzz: ProfilePost[] = repo
     .buzz()
-    .filter((b) => b.authorId === personId && b.kind !== 'news' && canViewBoard(ctx, b.boardId))
+    .filter((b) => authorOk(b.authorId) && b.kind !== 'news' && canViewBoard(ctx, b.boardId))
     .map((b) => {
       const images = b.images?.length ? b.images : b.image ? [b.image] : [];
       return {
         key: `buzz:${b.id}`,
         kind: 'buzz',
         id: b.id,
+        authorId: b.authorId,
         createdMs: createdMs(b, now),
         thumb: b.video ? b.video.poster ?? b.image : images[0],
         video: !!b.video,
@@ -558,11 +576,12 @@ export function recentPostsFor(ctx: GraphContext, personId: string, now = Date.n
     });
   const drift: ProfilePost[] = repo
     .drift()
-    .filter((d) => d.authorId === personId && canViewBoard(ctx, d.boardId))
+    .filter((d) => authorOk(d.authorId) && canViewBoard(ctx, d.boardId))
     .map((d) => ({
       key: `drift:${d.id}`,
       kind: 'drift',
       id: d.id,
+      authorId: d.authorId,
       createdMs: createdMs(d, now),
       thumb: d.image,
       video: d.kind === 'video',

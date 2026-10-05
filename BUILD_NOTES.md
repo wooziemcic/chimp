@@ -499,6 +499,82 @@ score         = aged + recency boost                   // ties: newest, then id
 | O7 | Open the profile of someone with a post in a private World you're not in | That post isn't in the grid. |
 | O8 | A new account's You | Clean "No posts yet". |
 
+## 11 · Buzz pre-release polish + receipt clarity
+
+### Trending: root cause of "1-like post above a 5-like post"
+
+**The formula, not the sorting or the data.** Section 10's recency boost was worth **6 likes** for a brand-new post. At early-stage counts that outweighed real engagement:
+
+| Post | Likes | Age | Old score | New score |
+|---|---|---|---|---|
+| Statue of Liberty | 1 | just now | 6.98 | **2.00** |
+| Dog | 5 | 2 days | 5.60 | **4.35** |
+
+**With the old formula,** the Dog lost whenever it was more than about 31 hours older than a fresh 1-like post.
+
+**Ruled out:**
+- **Sorting:** it's a total order; the tests check every adjacent pair.
+- **Stale ranking:** likes refresh every 60 s on Trending, and switching tabs or pulling to refresh resets the ranking time.
+- **Missing data:** likes are the real totals and comments are the real replies.
+
+**Fix:** the boost is now worth **1 like**, halving every 24 h. Engagement still halves every 7 days, so old viral posts still fade.
+
+```
+score = (likes + 1.5 × comments) × 0.5^(ageDays / 7) + 1 × 0.5^(ageHours / 24)
+```
+
+- **Examples (tested):**
+  - 5 likes 2 h to 5 days old beats 1 like now.
+  - 6 likes now beats 5 likes 2 days ago.
+  - With equal engagement, the newer post wins.
+  - 500 likes 30 days ago is below 50 likes today.
+- **Dev builds:** they log `[chimp:trending]`, with id prefixes and numbers only.
+
+### Buzz tab identities
+
+| Tab | Look | Order |
+|---|---|---|
+| For You | Full-width feed, one card per row | Newest first |
+| Following | **3-column grid** (`PostTile`, shared with profile Recent posts) | Newest first |
+| Trending | Full-width feed | Engagement + small recency |
+| Drift | Immersive full-screen | Newest first |
+
+**Following:**
+- **Whose posts:** only people you follow or are connected with, never yourself. It no longer includes Worlds you joined. It shows Buzz and World photo/video posts.
+- **Privacy:** same rules as profiles: nobody you blocked, no After Dark, no World you can't see.
+- **Tiles:**
+  - Photo → thumbnail.
+  - Video → poster with a ▶ badge.
+  - Text or poll → compact text tile.
+  - Each tile has a small author chip.
+- **Tap:** opens the canonical post (`/buzz/<id>` or `/drift/<id>`).
+- **Layout:** the bottom padding clears the tab bar.
+
+**Reselect:** tapping **Buzz** in the tab bar while already on Buzz scrolls the visible surface back to the top (feed, grid or Drift). It uses Expo Router's `useScrollToTop` with the tab bar's existing `tabPress` event. Nothing reloads and the sub-tab stays.
+
+### Receipts: visual clarity (semantics unchanged)
+
+Only on my newest outgoing message, as before. Never in After Dark.
+
+| State | Look |
+|---|---|
+| Sent | `3:39 PM · ✓ Sent`, muted grey |
+| Delivered | `3:39 PM · ✓✓ Delivered`, soft gold `#8A6A1E` (4.7:1) |
+| Seen | `3:39 PM · ✓✓ Seen`, bold deep gold `#6B4E00` on a pale gold pill (6.7:1) |
+
+The states are never told apart by colour alone: single vs double check, the word, and weight plus pill for Seen.
+
+**Why a real user may see only "Sent":**
+- The client flow is correct and tested end to end against a mock with 0011:
+  - The inbox sync calls `mark_delivered`.
+  - Opening the chat in the foreground calls `mark_read_upto`.
+  - The sender's open chat gets the member-row update live and reloads `chat_receipts`.
+  - Reconnect and foreground re-open the chat and refresh receipts.
+- **Most likely cause: migration 0011 isn't applied** on the project. The first receipt call then returns "function not found". The app silently falls back to the Build-5 behaviour, Sent only, for the rest of the session (by design: it never guesses).
+  - Dev builds now warn `[chimp:chat] receipts off: migration 0011 … is not on this Supabase project`.
+  - **To check in the SQL editor:** `select proname from pg_proc where proname in ('mark_delivered','mark_read_upto','chat_receipts');` should return 3 rows.
+- **Second possibility:** the recipient's phone runs a build without the Phase 8 code. It never calls `mark_delivered`, so you'd only ever see Sent → Seen, never Delivered.
+
 ---
 
 ## Files
@@ -538,6 +614,14 @@ score         = aged + recency boost                   // ties: newest, then id
     - `components/boards/Edition.tsx`
     - `app/(tabs)/buzz.tsx`, `app/drift/[id].tsx`, `app/profile/[id].tsx`, `app/(tabs)/you.tsx`
     - `utils/buzzRows.ts` (comment only)
+- Buzz polish + receipts (section 11):
+  - `utils/feedOrder.ts` (recency boost 6 → 1)
+  - `graph/surfaces.ts` (`followingGridFor`, shared `gridPosts`)
+  - `components/profile/RecentPosts.tsx` (exported `PostTile`, author chip)
+  - `app/(tabs)/buzz.tsx` (Following grid, full-width For You / Trending, reselect-to-top, dev Trending log)
+  - `components/drift/DriftPager.tsx` (`listRef`)
+  - `components/chat/ChatBubble.tsx` (receipt line)
+  - `services/backend/chat.ts` (dev warning when 0011 is missing, `receiptsSupport()`)
 
 ## Tested locally (simulated; not an iPhone)
 

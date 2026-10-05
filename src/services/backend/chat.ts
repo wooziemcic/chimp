@@ -149,8 +149,15 @@ export async function markRead(conversationId: string): Promise<void> {
  * session to the Build 5 behaviour (mark_conversation_read, no receipts).
  */
 let receiptsV2: boolean | null = null;
-const missingFunction = (e: { message: string; code?: string } | null) =>
-  !!e && (e.code === 'PGRST202' || e.code === '42883' || /could not find the function|function .* does not exist/i.test(e.message));
+const missingFunction = (e: { message: string; code?: string } | null) => {
+  const missing = !!e && (e.code === 'PGRST202' || e.code === '42883' || /could not find the function|function .* does not exist/i.test(e.message));
+  // Pre-release diagnostics: this is the silent "only Sent, never Delivered / Seen" case.
+  if (missing && receiptsV2 !== false && __DEV__) console.warn('[chimp:chat] receipts off: migration 0011 (mark_delivered / mark_read_upto / chat_receipts) is not on this Supabase project — showing "Sent" only');
+  return missing;
+};
+
+/** Diagnostics: are Delivered / Seen receipts available on this project? (unknown until the first call) */
+export const receiptsSupport = (): 'unknown' | 'on' | 'off' => (receiptsV2 === null ? 'unknown' : receiptsV2 ? 'on' : 'off');
 
 /**
  * Seen: move my read cursor up to `messageId` (a message I actually had on

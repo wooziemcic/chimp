@@ -12,7 +12,7 @@
  */
 import { LinearGradient } from 'expo-linear-gradient';
 import { Bookmark, ChevronRight, GalleryHorizontal, Heart, MessageCircle, Share2, Sparkles, ThumbsDown } from 'lucide-react-native';
-import { memo, useCallback, useState } from 'react';
+import { memo, type RefObject, useCallback, useState } from 'react';
 import { FlatList, Share, StyleSheet, View, type ViewToken } from 'react-native';
 
 import { ChimpVideo, formatDuration } from '@/components/media/ChimpVideo';
@@ -37,9 +37,11 @@ interface Props {
   topInset: number;
   /** Space the floating tab bar takes at the bottom. */
   bottomInset: number;
+  /** Lets Buzz scroll back to the first item (tab-bar reselect). */
+  listRef?: RefObject<FlatList<FeedEntry> | null>;
 }
 
-export function DriftPager({ entries, width, height, topInset, bottomInset }: Props) {
+export function DriftPager({ entries, width, height, topInset, bottomInset, listRef }: Props) {
   const [active, setActive] = useState(0);
   const [muted, setMuted] = useState(true);
   const toggleMute = useCallback(() => setMuted((m) => !m), []);
@@ -52,6 +54,7 @@ export function DriftPager({ entries, width, height, topInset, bottomInset }: Pr
 
   return (
     <FlatList
+      ref={listRef}
       data={entries}
       keyExtractor={(e) => e.key}
       pagingEnabled

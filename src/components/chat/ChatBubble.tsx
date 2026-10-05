@@ -1,4 +1,4 @@
-import { CornerUpLeft } from 'lucide-react-native';
+import { Check, CheckCheck, CornerUpLeft } from 'lucide-react-native';
 import { memo } from 'react';
 import { StyleSheet, View } from 'react-native';
 
@@ -110,22 +110,51 @@ export const ChatBubble = memo(function ChatBubble({ m, mine, sender, quote, rea
           </Tap>
         ) : receipt && receipt.kind === 'seenBy' && onReceiptPress ? (
           <Tap onPress={onReceiptPress} hitSlop={10} style={{ marginTop: 2, minHeight: 22, justifyContent: 'center' }} accessibilityRole="button" accessibilityLabel={`${receiptLabel(receipt)}. Show who`} testID="receipt">
-            <T v="caption" color={colors.inkFaint} style={{ fontSize: 11 }}>
-              {`${clockLabel(m.createdAt)} · `}
-              <T v="caption" weight="700" color={colors.inkMuted} style={{ fontSize: 11 }}>
-                {receiptLabel(receipt)}
-              </T>
-            </T>
+            <ReceiptLine at={m.createdAt} receipt={receipt} />
           </Tap>
+        ) : receipt && !m.status ? (
+          <View style={{ marginTop: 2 }} testID="receipt" accessibilityLabel={`${clockLabel(m.createdAt)}, ${receiptLabel(receipt)}`}>
+            <ReceiptLine at={m.createdAt} receipt={receipt} />
+          </View>
         ) : !group || mine || sender?.last ? (
-          <T v="caption" color={colors.inkFaint} style={{ marginTop: 2, fontSize: 11, marginHorizontal: group && !mine ? 12 : 0 }} testID={receipt ? 'receipt' : undefined}>
-            {m.status === 'sending' ? 'Sending…' : receipt ? `${clockLabel(m.createdAt)} · ${receiptLabel(receipt)}` : clockLabel(m.createdAt)}
+          <T v="caption" color={colors.inkFaint} style={{ marginTop: 2, fontSize: 11, marginHorizontal: group && !mine ? 12 : 0 }}>
+            {m.status === 'sending' ? 'Sending…' : clockLabel(m.createdAt)}
           </T>
         ) : null}
       </View>
     </View>
   );
 });
+
+/**
+ * The status line under my newest message: time · ✓ Sent / ✓✓ Delivered / ✓✓ Seen.
+ * Never colour alone: one check vs two, the word, and Seen is bold on a soft
+ * gold pill. Sent is muted grey, Delivered a soft gold, Seen a stronger gold
+ * (all ≥ 4.5:1 contrast at this size).
+ */
+const RECEIPT_STYLE = {
+  sent: { color: colors.inkMuted, weight: '600' as const, Icon: Check, pill: false },
+  delivered: { color: '#8A6A1E', weight: '700' as const, Icon: CheckCheck, pill: false },
+  seen: { color: '#6B4E00', weight: '800' as const, Icon: CheckCheck, pill: true },
+};
+
+function ReceiptLine({ at, receipt }: { at: string; receipt: Receipt }) {
+  const st = RECEIPT_STYLE[receipt.kind === 'seenBy' ? 'seen' : receipt.kind];
+  const { Icon } = st;
+  return (
+    <View style={styles.receipt} testID={`receipt-${receipt.kind}`}>
+      <T v="caption" color={colors.inkFaint} style={{ fontSize: 11 }}>
+        {`${clockLabel(at)} · `}
+      </T>
+      <View style={[styles.receiptTag, st.pill && styles.receiptPill]}>
+        <Icon size={12} color={st.color} strokeWidth={2.6} />
+        <T v="caption" weight={st.weight} color={st.color} style={{ fontSize: 11, marginLeft: 3 }}>
+          {receiptLabel(receipt)}
+        </T>
+      </View>
+    </View>
+  );
+}
 
 const styles = StyleSheet.create({
   bubble: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 20, maxWidth: 300 },
@@ -137,4 +166,7 @@ const styles = StyleSheet.create({
   chip: { flexDirection: 'row', alignItems: 'center', height: 26, paddingHorizontal: 8, borderRadius: 13, backgroundColor: colors.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
   chipMine: { backgroundColor: colors.accentSoft, borderColor: colors.accentGlow },
   chipBrain: { backgroundColor: colors.violetSoft, borderColor: '#D9C9FF' },
+  receipt: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', minHeight: 18 },
+  receiptTag: { flexDirection: 'row', alignItems: 'center' },
+  receiptPill: { backgroundColor: '#FCEFC7', borderRadius: 9, paddingHorizontal: 6, paddingVertical: 1 },
 });

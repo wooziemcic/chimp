@@ -31,26 +31,28 @@ export interface Engaged extends Timed {
  *
  *   engagement     = likes × 1 + comments × 1.5
  *   aged           = engagement × 0.5^(ageDays / 7)
- *   recency boost  = 6 × 0.5^(ageHours / 24)
+ *   recency boost  = 1 × 0.5^(ageHours / 24)
  *   score          = aged + recency boost
  *
  * - Engagement drives the order. Comments count a little more than likes
  *   (writing a reply is a stronger signal than a tap).
- * - The recency boost is small: worth 6 likes for a brand-new post, 3 after a
- *   day, 1.5 after two days, about 0 after a week. It lets a new post with a
- *   few likes compete with an older one that has slightly more.
  * - Engagement fades gently: 0.9 of its weight after a day, half after a week,
- *   a quarter after two weeks. A purely additive boost can't do this on its
- *   own: an old viral post's lead would never shrink, so it would stay on top
- *   forever. Between posts a day or two apart, engagement still decides.
+ *   a quarter after two weeks, so an old viral post doesn't stay on top forever.
+ * - The recency boost is small: worth ONE like for a brand-new post, half a
+ *   like after a day. It orders new posts with equal engagement (newest first)
+ *   and breaks near-ties; it never outweighs real engagement.
+ *
+ * Pre-release fix: the boost used to be worth 6 likes. With early-stage
+ * counts (1–5 likes) that let a brand-new 1-like post (≈ 7) outrank a 5-like
+ * post from 2 days ago (≈ 5.6). Now: 2.0 vs 4.2.
  */
 export const ENGAGEMENT = {
   likeWeight: 1,
   commentWeight: 1.5,
   /** Engagement's weight halves every this many days. */
   halfLifeDays: 7,
-  /** The recency boost for a post created just now. */
-  recencyBoost: 6,
+  /** The recency boost for a post created just now (worth one like). */
+  recencyBoost: 1,
   /** The boost halves every this many hours. */
   recencyHalfLifeHours: 24,
 } as const;
