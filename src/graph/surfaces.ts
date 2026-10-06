@@ -414,7 +414,7 @@ export interface FeedEntry {
   video?: boolean;
   durationSec?: number;
   /** Phase 6C: a real clip (url) or, for Demo fixtures, just a poster. */
-  clip?: { url?: string | number; poster?: ImageSrc; durationMs?: number; aspect?: number };
+  clip?: { url?: string | number; poster?: ImageSrc; durationMs?: number; aspect?: number; mediaId?: string };
   likeCount: number;
 }
 
@@ -479,7 +479,7 @@ export function buildDriftFeed(ctx: GraphContext, limit = 60, now = Date.now()):
       id: b.id,
       images: b.images?.length ? b.images : b.image ? [b.image] : [],
       video: !!b.video,
-      clip: b.video ? { url: b.video.url, poster: b.video.poster ?? b.image, durationMs: b.video.durationMs, aspect: b.video.aspect } : undefined,
+      clip: b.video ? { url: b.video.url, poster: b.video.poster ?? b.image, durationMs: b.video.durationMs, aspect: b.video.aspect, mediaId: b.video.mediaId } : undefined,
       aspects: b.imageAspects,
       caption: b.memeText ?? b.body ?? b.title ?? '',
       authorId: b.authorId,
@@ -530,6 +530,10 @@ export interface ProfilePost {
   text: string;
   poll?: boolean;
   href: `/buzz/${string}` | `/drift/${string}`;
+  /** Phase 9: a video's clip + media row, so a tile without a stored poster can still get one. */
+  clipUrl?: string;
+  mediaId?: string;
+  durationMs?: number;
 }
 
 /**
@@ -553,6 +557,43 @@ export function followingGridFor(ctx: GraphContext, now = Date.now()): ProfilePo
   return gridPosts(ctx, (a) => !!a && !repo.isMe(a) && !s.blocked[a] && !!(s.following[a] || s.connections[a]), now);
 }
 
+/** Following shows the last 7 days. */
+export const FOLLOWING_WINDOW_MS = 7 * 24 * 3_600_000;
+/** Posts shown per person before "View more". */
+export const FOLLOWING_PREVIEW = 3;
+
+export interface FollowingPerson {
+  personId: string;
+  /** That person's Buzz posts from the last 7 days, newest first (all of them; the UI shows 3 first). */
+  posts: ProfilePost[];
+  /** Their newest qualifying post (ms): people are ordered by it. */
+  latest: number;
+}
+
+/**
+ * Buzz → Following (Phase 9, people-first): one section per person you follow
+ * (or are connected with) who posted Buzz in the last 7 days. People ordered
+ * by their newest post; inside, that person's posts newest first. Same
+ * visibility rules as everywhere (blocks, World access, never After Dark).
+ * Nobody without a post this week gets an empty section.
+ */
+export function followingPeopleFor(ctx: GraphContext, now = Date.now()): FollowingPerson[] {
+  const { s } = ctx;
+  const since = now - FOLLOWING_WINDOW_MS;
+  const posts = gridPosts(ctx, (a) => !!a && !repo.isMe(a) && !s.blocked[a] && !!(s.following[a] || s.connections[a]), now).filter(
+    (p) => p.kind === 'buzz' && p.createdMs >= since,
+  );
+  const by = new Map<string, ProfilePost[]>();
+  for (const p of posts) {
+    const list = by.get(p.authorId!) ?? [];
+    list.push(p); // already newest first
+    by.set(p.authorId!, list);
+  }
+  return [...by.entries()]
+    .map(([personId, list]) => ({ personId, posts: list, latest: list[0].createdMs }))
+    .sort((a, b) => b.latest - a.latest || (a.personId < b.personId ? -1 : 1));
+}
+
 /** Grid tiles for posts whose author passes `authorOk`, newest first (one tile per canonical item). */
 function gridPosts(ctx: GraphContext, authorOk: (authorId: string | undefined) => boolean, now: number): ProfilePost[] {
   const buzz: ProfilePost[] = repo
@@ -572,6 +613,9 @@ function gridPosts(ctx: GraphContext, authorOk: (authorId: string | undefined) =
         text: b.memeText ?? b.body ?? b.title ?? b.poll?.question ?? '',
         poll: !!b.poll,
         href: `/buzz/${b.id}`,
+        clipUrl: b.video?.url,
+        mediaId: b.video?.mediaId,
+        durationMs: b.video?.durationMs,
       };
     });
   const drift: ProfilePost[] = repo

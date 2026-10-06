@@ -19,6 +19,7 @@ import { Linking, Platform } from 'react-native';
 import { isBackendConfigured, supabase } from '@/lib/supabase';
 
 import { logEvent } from './analytics';
+import { ackDelivery, registerDeliveryTask } from './deliveryAck';
 import { conversationOf, routeForPush, type PushData, type PushTarget } from './pushRoutes';
 
 const TOKEN_KEY = 'chimp.pushToken';
@@ -71,6 +72,9 @@ export async function ensurePushRegistered(opts: { ask: 'never' | 'once' | 'now'
     const projectId = (Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined)?.eas?.projectId;
     const { data: token } = await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined);
     await registerToken(token);
+    // Phase 9: let iOS wake Chimp briefly for a message push → "Delivered".
+    registerDeliveryTask();
+    void turnOnActivityOnce();
     return 'granted';
   } catch (e) {
     // Never block the app on push; never log the token itself.
@@ -113,25 +117,54 @@ export interface NotificationPrefs {
   messages: boolean;
   connections: boolean;
   after_dark: boolean;
+  /** Phase 9 (0012): likes, replies, Worlds you follow. */
+  activity: boolean;
 }
-export const DEFAULT_PREFS: NotificationPrefs = { messages: true, connections: true, after_dark: true };
+export const DEFAULT_PREFS: NotificationPrefs = { messages: true, connections: true, after_dark: true, activity: true };
 
 export async function fetchNotificationPrefs(): Promise<NotificationPrefs | null> {
   if (!isBackendConfigured) return null;
-  const { data, error } = await supabase().from('notification_prefs').select('messages, connections, after_dark').maybeSingle();
-  if (error) return null; // 0009 not applied yet
-  return (data as NotificationPrefs | null) ?? DEFAULT_PREFS;
+  let res = await supabase().from('notification_prefs').select('messages, connections, after_dark, activity').maybeSingle();
+  // Before 0012 there's no "activity" column: read the rest.
+  if (res.error && /activity|column/i.test(res.error.message)) res = await supabase().from('notification_prefs').select('messages, connections, after_dark').maybeSingle();
+  if (res.error) return null; // 0009 not applied yet
+  const row = (res.data as { messages?: boolean; connections?: boolean; after_dark?: boolean; activity?: boolean | null } | null) ?? {};
+  // activity null = not turned on yet by this (Phase 9) app — it is, on push registration (on by default).
+  return { ...DEFAULT_PREFS, ...row, activity: row.activity ?? true };
+}
+
+/**
+ * Phase 9 (0012): activity pushes (likes, replies, Worlds) start OFF on the
+ * server so older TestFlight builds — which can't turn them off or open them —
+ * never get them. This app turns them on once per account (default on); after
+ * that only the person's own switch decides. Quiet on servers without 0012.
+ */
+async function turnOnActivityOnce(): Promise<void> {
+  try {
+    const sb = supabase();
+    const r = await sb.from('notification_prefs').select('activity').maybeSingle();
+    if (r.error) return; // before 0012 (no column) or offline: try again next launch
+    const v = (r.data as { activity?: boolean | null } | null)?.activity;
+    if (v === true || v === false) return; // already decided
+    await sb.rpc('set_notification_prefs', { p_activity: true });
+  } catch {
+    /* next launch */
+  }
 }
 
 export async function saveNotificationPrefs(patch: Partial<NotificationPrefs>): Promise<NotificationPrefs> {
-  const { data, error } = await supabase().rpc('set_notification_prefs', {
+  const args: Record<string, boolean | null> = {
     p_messages: patch.messages ?? null,
     p_connections: patch.connections ?? null,
     p_after_dark: patch.after_dark ?? null,
-  });
-  if (error) throw new Error('Couldn’t save. Check your connection and try again.');
-  const r = data as NotificationPrefs;
-  return { messages: r.messages, connections: r.connections, after_dark: r.after_dark };
+  };
+  // Only send the 4th argument when it's being changed (older servers don't have it).
+  if (patch.activity !== undefined) args.p_activity = patch.activity;
+  const { data, error } = await supabase().rpc('set_notification_prefs', args);
+  if (error) throw new Error(patch.activity !== undefined && error.code === 'PGRST202' ? 'Activity notifications aren’t available on this server yet.' : 'Couldn’t save. Check your connection and try again.');
+  const r = data as Partial<Omit<NotificationPrefs, 'activity'>> & { activity?: boolean | null };
+  // activity null = not turned on yet by this app (it will be, on push registration): show it as on.
+  return { ...DEFAULT_PREFS, ...r, activity: r.activity ?? true } as NotificationPrefs;
 }
 
 // ─── Taps → screens (held until the account and its data are ready) ─────────
@@ -190,6 +223,11 @@ export function installPushHandling(activeConversation: () => string | undefined
       // Not for whoever is signed in now (signed out, another account): don't show it.
       const elsewhere = typeof data?.for === 'string' && data.for !== currentUser();
       const quiet = elsewhere || (!!here && here === activeConversation());
+      // Phase 9: a message push reached this phone while Chimp is open →
+      // Delivered (never Seen: only reading the chat does that). Checks the
+      // account itself (deliveryTarget); fire-and-forget.
+      const me = currentUser();
+      if (!elsewhere && me) void ackDelivery(data ?? null, me);
       return { shouldShowBanner: !quiet, shouldShowList: !quiet, shouldPlaySound: !quiet, shouldSetBadge: false };
     },
   });

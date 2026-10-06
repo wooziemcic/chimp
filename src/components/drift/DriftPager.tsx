@@ -15,13 +15,14 @@ import { Bookmark, ChevronRight, GalleryHorizontal, Heart, MessageCircle, Share2
 import { memo, type RefObject, useCallback, useState } from 'react';
 import { FlatList, Share, StyleSheet, View, type ViewToken } from 'react-native';
 
-import { ChimpVideo, formatDuration } from '@/components/media/ChimpVideo';
+import { ChimpVideo, VideoPlaceholder, formatDuration } from '@/components/media/ChimpVideo';
 import { Avatar } from '@/components/ui/Avatar';
 import { Img } from '@/components/ui/Img';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import type { FeedEntry } from '@/graph/surfaces';
 import { repo } from '@/services/repository';
+import { useVideoPoster } from '@/services/videoPosters';
 import { useChimp } from '@/store/useChimp';
 import { openMedia } from '@/store/useMediaViewer';
 import { colors } from '@/theme';
@@ -128,10 +129,22 @@ const DriftEntryPage = memo(function DriftEntryPage({
   return (
     <View style={{ width, height, backgroundColor: '#000' }} accessibilityLabel={`${author?.displayName ?? 'Someone'}: ${entry.caption || (clip ? 'video' : 'photo')}`}>
       {clip?.url && near && !disliked ? (
-        <ChimpVideo uri={clip.url} poster={clip.poster} active={active} muted={muted} onToggleMute={onToggleMute} contentFit={fit} style={StyleSheet.absoluteFill} muteStyle={{ top: topInset + 8, right: 14 }} />
+        <ChimpVideo
+          uri={clip.url}
+          poster={clip.poster}
+          durationMs={clip.durationMs}
+          mediaId={clip.mediaId}
+          ownerId={entry.authorId}
+          active={active}
+          muted={muted}
+          onToggleMute={onToggleMute}
+          contentFit={fit}
+          style={StyleSheet.absoluteFill}
+          muteStyle={{ top: topInset + 8, right: 14 }}
+        />
       ) : (
         <Tap onPress={clip ? undefined : open} disabled={!!clip} scaleTo={1} style={StyleSheet.absoluteFill} accessibilityLabel={clip ? 'Video' : 'Open photo'}>
-          <Img uri={clip?.poster ?? entry.images[0]} tint="#000" contentFit={fit} style={StyleSheet.absoluteFill} />
+          {clip ? <ClipStill clip={clip} ownerId={entry.authorId} fit={fit} /> : <Img uri={entry.images[0]} tint="#000" contentFit={fit} style={StyleSheet.absoluteFill} />}
         </Tap>
       )}
       <LinearGradient colors={['rgba(0,0,0,0.5)', 'rgba(0,0,0,0)']} style={[styles.shadeTop, { height: topInset + 40 }]} pointerEvents="none" />
@@ -250,3 +263,9 @@ const styles = StyleSheet.create({
   undo: { marginTop: 14, height: 36, paddingHorizontal: 18, borderRadius: 18, backgroundColor: colors.white, justifyContent: 'center' },
   countPill: { position: 'absolute', left: 16, flexDirection: 'row', alignItems: 'center', height: 26, paddingHorizontal: 10, borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.45)' },
 });
+
+/** Phase 9: a clip that isn't mounted as a player yet — its poster, or the designed placeholder (never plain black). */
+function ClipStill({ clip, ownerId, fit }: { clip: NonNullable<FeedEntry['clip']>; ownerId?: string; fit: 'contain' | 'cover' }) {
+  const poster = useVideoPoster({ url: clip.url, poster: clip.poster, durationMs: clip.durationMs, mediaId: clip.mediaId, ownerId });
+  return poster ? <Img uri={poster} tint="#000" contentFit={fit} style={StyleSheet.absoluteFill} /> : <VideoPlaceholder dark />;
+}

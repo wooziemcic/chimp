@@ -1,3 +1,170 @@
+# Chimp build notes — v0.9 — Phase 9: Social intelligence + engagement loop
+
+Branch `phase-9`. Not merged, not built, not submitted. Everything below was tested on a local Postgres 16, in Node against the real app modules, and in a Chromium web build against Supabase mocks — **not on an iPhone**. The two-iPhone checklist below is still to do.
+
+## What you must do once (in this order)
+
+1. **SQL** — Supabase → SQL Editor → run `supabase/migrations/0012_phase9_social.sql` once. It checks that 0011 is applied first. It is additive and idempotent: running it twice is safe. Do **not** re-run 0001–0011.
+2. **Edge Functions** — redeploy both:
+   - `push` (message pushes now carry `contentAvailable`; activity kinds are mapped).
+   - `delete-world` (now a storage clean-up worker). In its *Details*, turn **OFF "Enforce JWT verification"** — the function checks the session itself. With the new JWT signing keys that gateway check is one of the ways the old "non-2xx" happened.
+3. **Secrets / environment** — nothing new. No new keys in the app.
+4. **New native build** — this phase adds a native module (`expo-task-manager`), turns on iOS background remote notifications (`UIBackgroundModes: remote-notification` via the expo-notifications plugin), adds `expo-asset` as a direct dependency (Expo Doctor peer requirement) and changes the app entry to `index.ts`. Background "Delivered" only works in a new EAS build — not over the air, and not in Expo Go.
+
+## What changed
+
+### Happening (rebuilt — the node canvas is gone)
+`src/app/(tabs)/happening.tsx`, model in `src/graph/happeningNow.ts` (pure, unit-tested).
+Header "Happening" / "What changed that matters" (search and bell built in), then:
+- **Stories** — yours first (or Add), then people you know (unseen first), then Worlds' Stories. A 24-hour expiry is enforced on the phone too: real items now carry their exact time (`createdAtMs`), so a Story can't outlive 24 h because the app stayed open.
+- **Pinned** — your pins; your own Worlds first, then most recently pinned. Empty: "Long-press any World to pin it here."
+- **Happening now** — 3–5 cards from real events only (posts in the last 48 h, joins in the last 7 days). Deterministic score: own World +50, pinned +40, followed +30, joined +20, +15 per person you know involved (max +30), +4 per interaction (max +20), recency 20 × 0.5^(h/12), +6 interest match. A card needs a real reason; your own posts are never "news". Quiet state: "Nothing major has changed yet."
+- **People you may want to know** — mutual connections (counted only from 2 up) and shared Worlds from the server (`suggest_people`), plus shared interests / activity in your Worlds. Follow keeps the card visible ("Following") until you leave. Empty: a link to search.
+- **Changed since you were here** — likes, replies, follows, connections, posts in Worlds you follow, joins, friends' Stories; grouped per post / World, newest first, fresh dots since your last visit.
+
+### Search and identity
+People show `@username · city`; Worlds show `by @owner` / `Your World` / `Chimp World` + visibility + members, so two Worlds with the same name are told apart. Ids stay canonical (user_id, world_id) — no World id changed. Long-press a World result to pin it.
+
+### Pinned Worlds
+`board_pins (user_id, board_id, pinned_at)`, written only via `set_board_pin` (you must be able to see the World; capped at 20). Pins are private: you can only read your own. Long-press a World (Boards, You, search results, Pinned) → sheet with Pin / Unpin and Open World. Pinning never changes who can see a World — a pin of a World you lose access to simply disappears.
+
+### Story reactions and replies → DMs
+Reactions (❤️ 😂 🔥 😮 😢 👏) and text replies go into the normal 1:1 DM via `send_story_reply` (live, visible, unblocked Stories only; same message permissions as any DM; idempotent by client id). The bubble shows "You reacted to their story" / "Replied to your story" with the Story's picture while it's live, and "Story expired" / "Story unavailable" afterwards — the DM stays. Pushes: "Ana reacted ❤️ to your story" → opens the DM. Story replies never appear in Happening. A trigger stops the app from setting or changing the story link directly.
+
+### Notifications
+New in-app events + pushes (category **Activity**, its own switch in Settings): likes, replies to your post, replies in a thread you're in, new posts in Worlds you follow / own, people joining your World. Never to yourself, never across a block, never for a World you can't see; removed when the post or World is deleted. Throttling: likes and replies → at most one push per post per hour; World posts → one push per World every 3 h ("3 new posts in NYC Rooftops"); bursts fold into one. Activity events have their own per-sender budget (they can't silence a connection request).
+**Older TestFlight builds**: activity pushes start OFF on the server (`notification_prefs.activity` null) and this build turns them on once per account on push registration — older builds can't turn them off or open them, so they never get them. They still work otherwise and ignore the new in-app event kinds.
+
+### Buzz → Following (people-first)
+One section per person you follow (or are connected with) who posted Buzz in the last 7 days: avatar, name, `@username`, newest first, 3 posts then "View more · N" for the rest of THAT person's week. Ordered by each person's latest post; no empty sections. Empty: "It's quiet here." / "People you follow haven't posted this week." + **Find people** → Happening's people section. For You, Trending and Drift unchanged.
+
+### The flame
+Audit: the flame was the generic **Buzz tab-bar icon**. It is now a speech-bubble icon; 🔥 appears only on the **Trending 🔥** segment (engagement + recency). Segment widths follow their labels so "Trending 🔥" never truncates (checked at 375 / 390 / 430 pt).
+
+### World deletion (release blocker) — fixed
+**Root cause.** The app deleted a World by calling the `delete-world` Edge Function, and surfaced the SDK's generic "Edge Function returned a non-2xx status code". Our function always answers with JSON `{error}`, so that message came from the Supabase platform before our code ran: function not deployed (404), the gateway's "Enforce JWT verification" rejecting the token (401 — common with the new JWT signing keys), or a boot error. The client only read `body.error`, so the platform's own message was never shown. The database side was never the problem: `delete_world` on an empty Connections World ("Haircut": 0 posts, 1 member, 0 followers) succeeds (DB test W2a).
+**Fix.** The app now calls `rpc('delete_world', { p_board_id })` directly as the owner — one transaction (owner-only; everything that belongs to the World goes; files queued in `storage_cleanup`). The Edge Function became an optional, idempotent clean-up worker called afterwards. Users only ever see "Couldn't delete this World. Please try again."; details go to the dev console only. On success: sheet closes, local state, pins and caches forget the World, the app navigates to Boards, and an old link shows "World not found". Older builds keep deleting through the function (it calls `delete_world` as the caller).
+
+### "Delivered" without opening Chimp — fixed (as far as iOS allows)
+**Root cause.** Delivered was only acknowledged by the app's own sync (inbox load, a Realtime message, returning to the foreground). iOS suspends a backgrounded app within seconds, closing its Realtime socket, and the push ran no code. So a message stayed "Sent" until the recipient opened Chimp, then jumped Sent → Delivered → Seen. (Before 0011 was applied, receipts were "Sent" only.)
+**Fix.**
+- Message pushes carry `contentAvailable` and the newest message id (a coalesced burst too).
+- A background task (`index.ts` → `src/services/deliveryAck.ts`, defined at module scope before the UI) wakes, checks the push is for the account signed in on this phone, and calls `mark_delivered_upto(conversation, message)` — Delivered up to THAT message's server time, never Seen.
+- In the foreground, a received message push acknowledges at once.
+- Reconnect / foreground reconciliation is unchanged.
+- Never from APNs accepting the push (the sender's server never marks Delivered); never Seen from a push; no After Dark receipts; blocks and groups unchanged; one write per message.
+**iOS limits (unavoidable):** no background wake after the app was force-quit (swiped away), with Background App Refresh off, in Low Power Mode, or when iOS throttles background pushes — then Delivered appears the moment the app next opens or reconnects.
+
+### Black video cards — fixed
+**Root cause (A, through a race).** `makePoster()` created an expo-video player and asked for a frame immediately. On iOS, expo-video 57 attaches the clip to the player asynchronously; until then `generateThumbnailsAsync` returns an **empty list without an error** (its own source: `return []`, "TODO: should throw"). So `makePoster` returned null for every clip — picked or recorded in the in-app camera — the upload went ahead without a poster (by design: the poster is optional), `media.poster_path` stayed null (case H for every existing video), and every feed drew the dark `VideoPoster` frame with a play badge. Playback was always fine.
+**Fix.**
+- `posterFrom()` waits for the clip to load (`sourceLoad` / `readyToPlay`, bounded), then takes an early frame: about 10 % in, at least 0.25 s, at most 1 s, never frame 0. It retries briefly and always releases the player. If it really fails, the post still goes ahead (logged in dev only).
+- Older clips with no poster: the phone that shows one makes a poster from the clip (one at a time, only for clips still on screen, at most 8 waiting), caches it, and reuses it. When it's **your** clip, the poster is also uploaded next to it (`<name>-poster.jpg`) and recorded with `set_video_poster` (0012: owner only, only once, only that path), so everyone gets it — lazy backfill.
+- Until a poster exists, a designed light placeholder ("Video" + play badge + length) — never a black box.
+- One shared fix: Buzz cards (For You, Trending, World Today / Explore, post page), grid tiles (profile Recent posts, Following), Drift, the player.
+- Privacy: the poster lives next to the clip in the same bucket, with the same URL scheme, so it is exactly as visible as the clip itself. Note: the `media` bucket is public — unguessable URLs, not access control — for clips and photos alike (unchanged by this phase).
+
+## Migration 0012 (`supabase/migrations/0012_phase9_social.sql`)
+- **Tables / columns:** `board_pins`; `messages.story_item_id`, `messages.story_kind`; `notification_prefs.activity` (nullable); `user_events.ref_kind`, `user_events.board_id`.
+- **Indexes:** `board_pins_user_idx`, `user_events_ref_idx`, `user_events_board_idx`.
+- **Functions (RPC, authenticated only):** `set_board_pin`, `send_story_reply`, `mark_delivered_upto`, `suggest_people`, `set_video_poster`, `set_notification_prefs` (4-argument; old 3-argument calls still work).
+- **Internal (revoked from clients):** `_can_see_board_as`, `_emit_activity`, `_post_of`, `_push_enqueue` (merges coalesced data), `messages_push` (story wording, message id), `_emit` (separate budgets), `_push_allowed` (activity opt-in), and the triggers `reactions_events`, `comments_events`, `world_post_events`, `world_join_events`, `content_gone_events`, `user_events_push`, `messages_story_guard`.
+- **Constraints recreated as supersets:** push_outbox kinds / categories, user_events kinds.
+- **Nothing is renamed or dropped** except a function this file itself once defined (`pin_visible`, never deployed). RLS stays on; there is no `with check (true)`.
+- **Backwards compatible.** Old builds keep working: they don't read the new columns, the 3-argument prefs call still works, delete-world still works, and they get no activity pushes. The new build without 0012 falls back everywhere (PGRST202): pins hidden, plain-text story replies, mark_delivered, no activity switch.
+
+## Independent review
+A separate reviewer read the whole Phase 9 change set and found one blocker and six should-fixes. All were fixed and re-verified:
+- **Blocker:** pin visibility could be used to probe who blocked you and who is connected to whom → pins are now private.
+- Story columns could be forged by a direct insert → a trigger now refuses that.
+- Story reactions on World Stories sent a non-UUID id → the raw frame id is sent.
+- Older builds would have received activity pushes they can't open or turn off → activity pushes are now opt-in by this build.
+- Activity events shared the per-sender budget with connection requests → they now have separate budgets.
+- Poster work in long feeds was unbounded → it is now bounded and stops when a tile scrolls away.
+- Comment pushes were not throttled per hour → fixed.
+
+## Known limitations
+- iOS background "Delivered": no wake after a force-quit, with Background App Refresh off, in Low Power Mode, or under iOS throttling (see above). Needs a new native build.
+- The activity opt-in is per account, not per phone: someone signed in on a new build AND an old build gets activity pushes on the old phone too (no switch there).
+- If push permission was never granted, Settings shows Activity on while the server value is still unset (it is set on the first successful push registration).
+- Older video posters are made on each viewer's phone until the owner's phone has uploaded one (owner backfill happens the first time the owner sees that clip in a list). Web: placeholder only.
+- When iOS launches the app in the background for a push, it also runs the normal startup (an `app_open` event, data refresh).
+- Deleting a post skips its still-pending pushes; a push already folded into a burst may still be delivered (rare; tapping it shows "This post isn't available").
+- Pins: the 20-pin limit can be exceeded by one or two under simultaneous calls.
+- `are_connected(a, b)` (0004) is callable by any signed-in user — pre-existing, unchanged; `suggest_people` only reports mutual connections from 2 up.
+- Happening uses what this phone has loaded (the usual 300-row windows); very old activity doesn't appear.
+
+## Two-iPhone test checklist (A and B, new EAS build on both, 0012 + both functions deployed)
+Messages — receipts (A sends, watch A's receipt under the newest message):
+1. B has Chimp open on another screen → **Delivered** within a second or two.
+2. B in the background (home screen, phone online, not force-quit) → **Delivered** shortly after the push banner appears (where iOS allows).
+3. B in Airplane Mode → stays **Sent**. Turn Airplane Mode off → **Delivered** once B's phone gets the push or reconnects.
+4. B opens the conversation → **Seen**.
+5. B receives the push, never opens Chimp → stays **Delivered**, never Seen.
+6. B force-quits Chimp (swipe away), A sends → expect **Sent** until B opens Chimp (iOS limit), then **Delivered**, then Seen only after opening the chat.
+7. B signs out → A sends → stays Sent; B signs in as another account on that phone → no Delivered for B's old account.
+8. Group of three: the same for the newest message; After Dark Vibes: no receipts at all.
+Stories:
+9. B posts a Story; A reacts ❤️ and replies "Nice" → both land in the A↔B DM with "You reacted / You replied to their story"; B gets a push "A reacted ❤️ to your story" that opens the DM; B sees "Reacted / Replied to your story".
+10. Next day (24 h+): the Story is gone from Happening; the DM still shows the messages with "Story expired".
+11. B blocks A → A can't react/reply (the Story isn't shown); no push.
+Notifications:
+12. A likes B's post → B gets one push "A liked your post" → opens the post; A unlikes + likes again → no second push.
+13. A and C like within a minute → one push ("2 people liked your post").
+14. A replies to B's post; C replies too → B: one push this hour; A gets "C also replied to a post you replied to".
+15. B follows A's World; A posts 3 times → B: one push "3 new posts in <World>" → opens the World.
+16. C joins A's World → A: "C joined <World>".
+17. Settings → Notifications → Activity off on B → repeat 12 → B gets the in-app event, no push.
+18. B deletes a post A liked → A's bell/What changed no longer shows it; an old push opens "This post isn't available".
+19. Self: liking your own post / posting in your own World → no notification.
+Worlds:
+20. Owner deletes an empty Connections World ("Haircut" case) → gone, back on Boards, no error; delete a World with posts/members/followers/a Story → all gone; a member's phone shows "World not found" for the old link.
+21. Non-owner: no Delete option; the server refuses a direct call.
+22. Long-press a World (Boards, search, You) → Pin → appears in Happening → Pinned; long-press there → Unpin.
+Video:
+23. Record a 10 s clip in Chimp and pick a clip from Photos → both show a real poster in For You, Following, profile grid, World Today, Drift before playing; tap → plays smoothly.
+24. An older clip (posted before this build) → shows a poster after a moment on the owner's phone (and on others once the owner has seen it), or the light "Video" placeholder — never a black card; still plays.
+
+## Release QA checklist for the 20–30-user cohort
+- [ ] 0012 run once on production; `select count(*) from board_pins` works; `\df set_video_poster` exists.
+- [ ] `push` and `delete-world` redeployed; delete-world "Enforce JWT verification" off.
+- [ ] New EAS build installed by at least two testers; Settings → Notifications shows Messages, Connections, After Dark, Activity.
+- [ ] Happening on a brand-new account: calm empty states, nothing invented; on an active account: 3–5 Happening-now cards with honest reasons.
+- [ ] Search: two Worlds with the same name show different "by @owner".
+- [ ] Buzz → Following: sections per person, View more, empty state → Find people; tabs read For You · Following · Trending 🔥 · Drift (no truncation on the smallest phone in the cohort).
+- [ ] Story reply/reaction → DM; expired context after 24 h.
+- [ ] Notifications: like / reply / follow / connection request / accepted / World post / World join / story reply each arrive once, open the right screen, respect Activity off, blocks, deletion.
+- [ ] Receipts: Sent → Delivered while backgrounded → Seen on open (two-iPhone steps 1–6).
+- [ ] World deletion: empty, with content, retry after airplane mode (friendly error, then success).
+- [ ] Video: new clips have posters everywhere; old clips play; no black cards.
+- [ ] Testers still on an older TestFlight build: messages, connections, World delete still work; they get no activity pushes.
+- [ ] App Review Demo still reachable and unchanged.
+
+## Tested (simulated; NOT an iPhone)
+- **TypeScript and lint:** both clean (`npx tsc --noEmit`, `npx expo lint`).
+- **Expo Doctor:** 19/21 checks pass. The 2 that fail only need network access this sandbox doesn't have (the app.json schema download and the React Native Directory lookup). The missing `expo-asset` peer is now installed.
+- **Database (local Postgres 16, 0001→0012, then 0004→0012 re-run for idempotency):** Phase 9 suite 85/85. It covers:
+  - pins
+  - story replies
+  - Delivered-up-to
+  - activity notifications (dedupe, self, blocks, private Worlds, deletion, opt-in, budgets)
+  - suggestions
+  - World deletion A–G
+  - poster backfill
+  - review fixes
+
+  All 11 earlier suites match the Phase 8 baseline exactly, including the same 4 legacy suites whose superseded expectations were already failing before this phase.
+- **Node (real app modules):**
+  - New: Phase 9 74/74 (Happening ranking / sparse / privacy / duplicate names, Following grouping, Story context, push routes, background Delivered, pins store, posters); video poster race 7/7.
+  - Regression: o10 96, p8 52, m7 38, p9 41, a7 90, t7 14, p7 19, b7 55, c7client 24, i7 45, push7 33, c6 56, scenario6 all passed.
+- **Web (Chromium against Supabase mocks; REAL and Demo accounts):**
+  - New: Phase 9 34/34 (Happening, search, pins by long-press, Story → DM, Story expired, video placeholders, sparse account); World delete 34/34 (incl. the "Haircut" case and retry).
+  - Updated Following suite: o10_web 44/44.
+  - Regression: post9 31, msg8 23, r8_layout 248, l7_layout 88, c7 18, ad7 56 + 56, review 31, ph 36, ad7_sweep 12, ad7_real 6, b7 23, tt7 10, chat 38, m7 80, b5_nav 31, b5p2 13, d6 72, av 15, smoke 33, cycles complete with 0 page errors, Demo sweep 0 errors.
+  - c6 66/67: the one failure ("Buzz ready before the network load") also fails on the pre-Phase-9 baseline.
+- **Test updates:** checks for the retired node canvas and the old Following grid were rewritten for the new screens. The labels "Trending 🔥" and the new search placeholder were updated.
+
+
 # Chimp build notes — v0.8 — Device Reliability, Responsive iOS System, Messaging v2, Posting Reliability, Content Ordering
 
 5 Oct 2026 · branch `phase-7` (on top of `ea2961a`).

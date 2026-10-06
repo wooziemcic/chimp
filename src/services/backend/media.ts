@@ -19,6 +19,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { Platform } from 'react-native';
 
 import { MEDIA_BUCKET, mediaUrl, publishableKey, storageObjectUrl, supabase } from '@/lib/supabase';
+import { posterTimeSec } from '@/utils/videoPoster';
 
 export interface PickedImage {
   uri: string;
@@ -425,25 +426,68 @@ async function fileSize(uri: string): Promise<number | undefined> {
   }
 }
 
-/** A JPEG poster frame from the clip (on device). Optional: null when it can't be made. */
-export async function makePoster(v: PickedVideo): Promise<PickedImage | null> {
+/**
+ * Phase 9 — a JPEG poster frame from a clip (on device; a local file or a URL).
+ *
+ * Root cause of the black video cards: this used to call
+ * generateThumbnailsAsync() right after createVideoPlayer(). On iOS the player
+ * loads its source asynchronously, and until the item is attached expo-video
+ * returns an EMPTY list (no error) — so no poster was ever made, poster_path
+ * stayed null and feeds drew a dark frame. Now: wait until the clip has
+ * loaded, then ask for an early frame (not frame 0, often black), retrying
+ * briefly. Null when it really can't be made (the post still goes ahead).
+ */
+export async function posterFrom(uri: string, durationMs?: number, maxWidth = 720): Promise<PickedImage | null> {
   if (Platform.OS === 'web') return null;
+  const { createVideoPlayer } = await import('expo-video');
+  const player = createVideoPlayer(uri);
+  const deadline = Date.now() + 9000;
   try {
-    const { createVideoPlayer } = await import('expo-video');
-    const player = createVideoPlayer(v.uri);
-    try {
-      const at = v.durationMs ? Math.min(1, v.durationMs / 2000) : 0.5;
+    await new Promise<void>((resolve) => {
+      if (player.status === 'readyToPlay') return resolve();
+      let subs: { remove: () => void }[] = [];
+      const done = () => {
+        clearTimeout(t);
+        subs.forEach((x) => x.remove());
+        subs = [];
+        resolve();
+      };
+      const t = setTimeout(done, 6000);
+      subs = [
+        player.addListener('sourceLoad', done),
+        player.addListener('statusChange', ({ status }) => {
+          if (status === 'readyToPlay' || status === 'error') done();
+        }),
+      ];
+    });
+    const at = posterTimeSec(durationMs ?? (player.duration ? player.duration * 1000 : undefined));
+    for (let attempt = 0; attempt < 6 && Date.now() < deadline; attempt++) {
       const thumbs = await Promise.race([
-        player.generateThumbnailsAsync([at], { maxWidth: 720 }),
-        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('poster timeout')), 6000)),
+        player.generateThumbnailsAsync([at], { maxWidth }),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('poster timeout')), Math.max(500, deadline - Date.now()))),
       ]);
-      if (!thumbs[0]) return null;
-      const rendered = await ImageManipulator.manipulate(thumbs[0]).renderAsync();
-      const out = await rendered.saveAsync({ format: SaveFormat.JPEG, compress: 0.75 });
-      return { uri: out.uri, width: out.width, height: out.height, mimeType: 'image/jpeg' };
-    } finally {
-      player.release();
+      if (thumbs[0]) {
+        const rendered = await ImageManipulator.manipulate(thumbs[0]).renderAsync();
+        const out = await rendered.saveAsync({ format: SaveFormat.JPEG, compress: 0.75 });
+        return { uri: out.uri, width: out.width, height: out.height, mimeType: 'image/jpeg' };
+      }
+      // The item isn't attached yet: try again in a moment.
+      await new Promise((r) => setTimeout(r, 250));
     }
+    if (__DEV__) console.warn('[chimp:video] poster: no frame (the clip never became ready)');
+    return null;
+  } catch (e) {
+    if (__DEV__) console.warn('[chimp:video] poster failed:', e instanceof Error ? e.message.slice(0, 80) : 'error');
+    return null;
+  } finally {
+    player.release();
+  }
+}
+
+/** A JPEG poster frame from a picked / recorded clip. Optional: null when it can't be made. */
+export async function makePoster(v: PickedVideo): Promise<PickedImage | null> {
+  try {
+    return await posterFrom(v.uri, v.durationMs);
   } catch {
     return null;
   }
@@ -664,3 +708,26 @@ export async function discardPaths(paths: string[]): Promise<void> {
 }
 
 const kindOfMessage = (m: string) => (/network|fetch|timed out|load failed|abort/i.test(m) ? 'network' : 'other');
+
+/**
+ * Phase 9 — lazy poster backfill for one of YOUR older videos that has none:
+ * upload the poster next to the clip (`<name>-poster.jpg`, the folder rule
+ * 0008 enforces) and record it (set_video_poster, 0012: owner only, only when
+ * the clip has no poster yet). Best effort; returns the poster URL or null.
+ */
+export async function backfillVideoPoster(mediaId: string, posterPath: string, localPoster: string): Promise<string | null> {
+  try {
+    if (!(await alreadyUploaded(posterPath))) await uploadFileWithProgress(posterPath, localPoster, 'image/jpeg', undefined, undefined, { idempotent: true });
+    const { error } = await supabase().rpc('set_video_poster', { p_media_id: mediaId, p_poster_path: posterPath });
+    if (error) {
+      // A server without 0012: don't leave the uploaded poster behind.
+      if (error.code === 'PGRST202') await supabase().storage.from(MEDIA_BUCKET).remove([posterPath]).catch(() => undefined);
+      if (__DEV__) console.warn('[chimp:video] poster backfill not saved:', error.code ?? 'error');
+      return null;
+    }
+    return mediaUrl(posterPath);
+  } catch (e) {
+    if (__DEV__) console.warn('[chimp:video] poster backfill failed:', e instanceof Error ? e.message.slice(0, 80) : 'error');
+    return null;
+  }
+}

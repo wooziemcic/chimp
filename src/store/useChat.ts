@@ -57,6 +57,9 @@ export interface ChatMsg {
   /** Phase 7A: a voice note's URL and length. */
   audio?: string;
   durationMs?: number;
+  /** Phase 9 (0012): a reply / reaction to a Story, and which Story. */
+  storyItemId?: string;
+  storyKind?: 'reply' | 'reaction';
   /** Local only: optimistic states. */
   status?: 'sending' | 'failed';
   /**
@@ -248,6 +251,8 @@ function toMsg(r: MessageRow): ChatMsg {
     viewOnce: r.view_once || undefined,
     viewedAt: r.viewed_at ?? undefined,
     durationMs: r.duration_ms ?? undefined,
+    storyItemId: r.story_item_id ?? undefined,
+    storyKind: r.story_kind ?? undefined,
   };
 }
 

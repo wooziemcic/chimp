@@ -3,6 +3,7 @@ import { BarChart3, Copy, Play } from 'lucide-react-native';
 import { memo, useMemo, useState } from 'react';
 import { StyleSheet, useWindowDimensions, View } from 'react-native';
 
+import { VideoPlaceholder } from '@/components/media/ChimpVideo';
 import { Avatar } from '@/components/ui/Avatar';
 import { Img } from '@/components/ui/Img';
 import { SectionHeader } from '@/components/ui/misc';
@@ -11,6 +12,7 @@ import { T } from '@/components/ui/Text';
 import { type ProfilePost, recentPostsFor } from '@/graph/surfaces';
 import { useGraphCtx } from '@/hooks/useGraph';
 import { repo } from '@/services/repository';
+import { useVideoPoster } from '@/services/videoPosters';
 import { colors, radius } from '@/theme';
 import { whenLabel } from '@/utils/format';
 import { pushOnce } from '@/utils/nav';
@@ -89,13 +91,16 @@ export const RecentPosts = memo(function RecentPosts({ personId, firstName, own 
 export function PostTile({ post: p, size, showAuthor, testPrefix = 'recent-tile' }: { post: ProfilePost; size: number; showAuthor?: boolean; testPrefix?: string }) {
   const when = whenLabel(p.createdMs);
   const author = showAuthor && p.authorId ? repo.user(p.authorId) : undefined;
+  // Phase 9: a video without a stored poster gets one made on this phone (or the placeholder).
+  const made = useVideoPoster(p.video ? { url: p.clipUrl, poster: p.thumb, durationMs: p.durationMs, mediaId: p.mediaId, ownerId: p.authorId } : undefined);
+  const thumb = p.video ? made : p.thumb;
   const what = p.video ? 'Video' : p.thumb ? (p.multi ? 'Photos' : 'Photo') : p.poll ? 'Poll' : 'Post';
   const label = `${author ? `${author.displayName}: ` : ''}${what}${p.text ? `: ${p.text.slice(0, 80)}` : ''}${when ? `, ${when}` : ''}`;
   return (
     <Tap onPress={() => pushOnce(p.href)} scaleTo={0.97} style={[styles.tile, { width: size, height: size }]} accessibilityLabel={label} testID={`${testPrefix}-${p.id}`}>
-      {p.thumb ? (
+      {thumb ? (
         <>
-          <Img uri={p.thumb} style={StyleSheet.absoluteFill} />
+          <Img uri={thumb} style={StyleSheet.absoluteFill} />
           {p.video || p.multi ? (
             <View style={styles.badge} testID={p.video ? 'tile-video-badge' : undefined}>
               {p.video ? <Play size={12} color={colors.white} fill={colors.white} /> : <Copy size={12} color={colors.white} />}
@@ -104,9 +109,13 @@ export function PostTile({ post: p, size, showAuthor, testPrefix = 'recent-tile'
           {author ? <Avatar uri={author.avatar} name={author.displayName} size={22} ring={colors.white} ringWidth={1.5} style={styles.avatar} /> : null}
         </>
       ) : p.video ? (
-        // A video still being processed (no poster yet): a dark tile with a play badge.
-        <View style={[StyleSheet.absoluteFill, styles.center, { backgroundColor: colors.ink }]} testID="tile-video-badge">
-          <Play size={22} color={colors.white} fill={colors.white} />
+        // No poster (yet): the designed video placeholder with a play badge — never a black tile.
+        <View style={[StyleSheet.absoluteFill, styles.center]} testID="tile-video-badge">
+          <VideoPlaceholder compact />
+          <View style={styles.playDot}>
+            <Play size={16} color={colors.white} fill={colors.white} />
+          </View>
+          {author ? <Avatar uri={author.avatar} name={author.displayName} size={22} ring={colors.white} ringWidth={1.5} style={styles.avatar} /> : null}
         </View>
       ) : (
         <View style={styles.textCard} testID="tile-text">
@@ -130,6 +139,7 @@ const styles = StyleSheet.create({
   tile: { borderRadius: 10, overflow: 'hidden', backgroundColor: colors.bgSoft },
   center: { alignItems: 'center', justifyContent: 'center' },
   avatar: { position: 'absolute', left: 6, bottom: 6 },
+  playDot: { width: 34, height: 34, borderRadius: 17, backgroundColor: 'rgba(11,13,18,0.55)', alignItems: 'center', justifyContent: 'center', paddingLeft: 2 },
   badge: { position: 'absolute', top: 6, right: 6, width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
   textCard: { flex: 1, padding: 9, backgroundColor: colors.accentSoft },
   empty: { marginHorizontal: 16, paddingVertical: 16, paddingHorizontal: 14, borderRadius: radius.lg, backgroundColor: colors.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line },

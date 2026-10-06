@@ -382,7 +382,7 @@ function VideoCard({ item, width, onPress, expanded }: { item: BuzzItem; width: 
   return (
     <View style={[styles.cardFlat, { width }]} testID="buzz-card">
       <Tap onPress={() => openVideo(v, viewerMeta(item))} scaleTo={0.995} accessibilityLabel="Play video">
-        <VideoPoster poster={v.poster ?? item.image} durationMs={v.durationMs} width={width} height={h} />
+        <VideoPoster poster={v.poster ?? item.image} durationMs={v.durationMs} width={width} height={h} url={v.url} mediaId={v.mediaId} ownerId={item.authorId} />
       </Tap>
       <View style={{ paddingHorizontal: 14, paddingTop: 12, paddingBottom: 4 }}>
         {caption ? (

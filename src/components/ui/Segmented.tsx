@@ -22,7 +22,8 @@ export function Segmented<K extends string>({
   testIDPrefix,
 }: {
   value: K;
-  options: { id: K; label: string; badge?: boolean }[];
+  /** `flex`: a relative width (default 1) — a longer label can take a little more room. */
+  options: { id: K; label: string; badge?: boolean; flex?: number }[];
   onChange: (id: K) => void;
   /** Back-compat: `dark` = tone "dark". */
   dark?: boolean;
@@ -50,7 +51,7 @@ export function Segmented<K extends string>({
             accessibilityState={{ selected: on }}
             accessibilityLabel={o.badge ? `${o.label}, new` : o.label}
             testID={testIDPrefix ? `${testIDPrefix}${o.id}` : undefined}
-            style={[styles.seg, (tight || !many) && { paddingHorizontal: tight ? 1 : 2 }, on && { backgroundColor: activeBg }, on && tone !== 'night' && shadow.glow]}
+            style={[styles.seg, o.flex ? { flex: o.flex } : null, (tight || !many) && { paddingHorizontal: tight ? 1 : 2 }, on && { backgroundColor: activeBg }, on && tone !== 'night' && shadow.glow]}
           >
             <T
               v={many ? 'footnote' : 'callout'}

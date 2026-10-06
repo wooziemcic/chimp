@@ -8,14 +8,17 @@
  * user_events Realtime channel (services/live.ts). Rows are keyed by id, so an
  * event seen by both Realtime and a refresh appears once.
  *
- * Only these three kinds are shown here: After Dark events keep their own,
- * generic surfaces, and a one-way Crush never produces an event at all.
+ * Phase 9 adds activity (likes, replies, posts in Worlds you follow, joins).
+ * After Dark events keep their own, generic surfaces, and a one-way Crush
+ * never produces an event at all.
  */
 import { create } from 'zustand';
 
 import { fetchSocialEvents, markEventsSeen, type SocialEventRow } from '@/services/backend/people';
 
-export const SOCIAL_KINDS = ['follow', 'connection_request', 'connection_accepted'] as const;
+/** Follows and connections (Build 5) + Phase 9 activity (0012): likes, replies, Worlds you follow, joins. */
+export const SOCIAL_KINDS = ['follow', 'connection_request', 'connection_accepted', 'content_like', 'content_comment', 'thread_reply', 'world_post', 'world_join'] as const;
+export const ACTIVITY_KINDS = new Set<string>(['content_like', 'content_comment', 'thread_reply', 'world_post', 'world_join']);
 export type SocialKind = (typeof SOCIAL_KINDS)[number];
 export const isSocialKind = (k: string): k is SocialKind => (SOCIAL_KINDS as readonly string[]).includes(k);
 
@@ -29,7 +32,7 @@ interface SocialInbox {
   reset: () => void;
 }
 
-const MAX = 50;
+const MAX = 80;
 const merge = (a: SocialEventRow[], b: SocialEventRow[]) => {
   const byId = new Map<string, SocialEventRow>();
   for (const r of [...a, ...b]) {
@@ -71,5 +74,10 @@ export function socialLine(kind: string, name: string): string {
   if (kind === 'follow') return `${name} followed you`;
   if (kind === 'connection_request') return `${name} wants to connect`;
   if (kind === 'connection_accepted') return `${name} accepted your connection`;
+  if (kind === 'content_like') return `${name} liked your post`;
+  if (kind === 'content_comment') return `${name} commented on your post`;
+  if (kind === 'thread_reply') return `${name} also replied to a post you replied to`;
+  if (kind === 'world_post') return `${name} posted in a World you follow`;
+  if (kind === 'world_join') return `${name} joined your World`;
   return name;
 }

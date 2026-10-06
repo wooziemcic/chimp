@@ -192,7 +192,7 @@ export function toBuzz(r: BuzzRow, media: Record<string, string>, aspects: Media
   const urls = ids.map((id) => media[id]);
   // Phase 6C: a video Buzz carries its clip; `image` becomes the poster frame.
   const vid = ids.find((id) => videos[id]);
-  const video = vid ? { url: media[vid], poster: videos[vid].poster, durationMs: videos[vid].durationMs, aspect: aspects[vid] } : undefined;
+  const video = vid ? { url: media[vid], poster: videos[vid].poster, durationMs: videos[vid].durationMs, aspect: aspects[vid], mediaId: vid } : undefined;
   const text = [r.title, r.body, r.meme_text, r.poll?.question].filter(Boolean).join(' ');
   return {
     id: r.id,
@@ -252,7 +252,7 @@ export function toStories(rows: StoryRow[], media: Record<string, string>, board
   for (const r of [...rows].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))) {
     const image = media[r.media_id];
     if (!image) continue;
-    const base = { authorId: r.author_id, image, caption: r.caption ?? '', createdAt: ageLabel(r.created_at), durationMs: 5000, boardId: r.board_id ?? undefined };
+    const base = { authorId: r.author_id, image, caption: r.caption ?? '', createdAt: ageLabel(r.created_at), createdAtMs: Date.parse(r.created_at), durationMs: 5000, boardId: r.board_id ?? undefined };
     push(`p:${r.author_id}`, { kind: 'person', id: r.author_id }, 'friend', { ...base, id: `${r.id}`, storyId: `st_p_${r.author_id}` });
     if (r.board_id) push(`b:${r.board_id}`, { kind: 'board', id: r.board_id }, 'trending', { ...base, id: `${r.id}_w`, storyId: `st_b_${r.board_id}` });
   }

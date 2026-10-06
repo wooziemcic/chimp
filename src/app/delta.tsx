@@ -1,6 +1,6 @@
-import { router } from 'expo-router';
+import { type Href, router } from 'expo-router';
 import { CalendarClock, Calendar, CheckCheck, Heart, LayoutGrid, Link2, PlayCircle, Sparkles, UserPlus } from 'lucide-react-native';
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { FlatList, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -9,10 +9,12 @@ import { EmptyState } from '@/components/ui/misc';
 import { SheetHeader } from '@/components/ui/SheetHeader';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import { useUnseenChanges } from '@/hooks/useGraph';
+import { changedSince } from '@/graph/happeningNow';
+import { useGraphCtx, useUnseenChanges } from '@/hooks/useGraph';
+import { useNow } from '@/hooks/useNow';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
-import { socialLine, useSocialInbox } from '@/store/useSocialInbox';
+import { useSocialInbox } from '@/store/useSocialInbox';
 import type { SocialEventRow } from '@/services/backend/people';
 import { Avatar } from '@/components/ui/Avatar';
 import { colors, radius } from '@/theme';
@@ -48,9 +50,9 @@ export default function DeltaSheet() {
     const t = setTimeout(markSocialSeen, 800);
     return () => clearTimeout(t);
   }, [markSocialSeen]);
-  const openPerson = (id: string) => {
+  const openRef = (href: Href) => {
     router.back();
-    setTimeout(() => router.push(`/profile/${id}`), 250);
+    setTimeout(() => router.push(href), 250);
   };
 
   const open = (d: ChangeEvent) => {
@@ -63,7 +65,7 @@ export default function DeltaSheet() {
     <View style={{ flex: 1, backgroundColor: colors.surface }}>
       <SheetHeader
         title="Since you left"
-        subtitle={unseen.length ? `${unseen.length} things changed in your world` : social.length ? 'Your latest follows and connections' : 'Nothing new yet'}
+        subtitle={unseen.length ? `${unseen.length} things changed in your world` : social.length ? 'Your latest activity' : 'Nothing new yet'}
         right={
           unseen.length ? (
             <Tap onPress={markAll} style={styles.markAll} accessibilityLabel="Mark all as seen">
@@ -80,7 +82,7 @@ export default function DeltaSheet() {
         keyExtractor={(d) => d.id}
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: insets.bottom + 24, gap: 10 }}
         renderItem={({ item }) => <DeltaRow delta={item} onPress={() => open(item)} />}
-        ListHeaderComponent={social.length ? <SocialList items={social} onOpen={openPerson} /> : null}
+        ListHeaderComponent={social.length ? <SocialList items={social} onOpen={openRef} /> : null}
         ListEmptyComponent={
           social.length ? null : (
             <EmptyState
@@ -102,35 +104,37 @@ export default function DeltaSheet() {
   );
 }
 
-/** Follows and connections (newest first). Tap → their profile. */
-function SocialList({ items, onOpen }: { items: SocialEventRow[]; onOpen: (personId: string) => void }) {
-  const shown = items.filter((i) => !!i.actor_id).slice(0, 20);
-  if (!shown.length) return null;
+/**
+ * Phase 9: what happened to you — follows, connections, likes, replies, posts
+ * in Worlds you follow, joins — grouped per post / World (newest first).
+ * Tap → the person, post or World.
+ */
+function SocialList({ items, onOpen }: { items: SocialEventRow[]; onOpen: (href: Href) => void }) {
+  const ctx = useGraphCtx();
+  const now = useNow();
+  const lines = useMemo(() => changedSince(ctx, items, 0, now, 30, { stories: false, fresh: (g) => g.some((e) => !e.seen_at) }), [ctx, items, now]);
+  if (!lines.length) return null;
   return (
     <View style={{ marginBottom: 6 }} testID="social-notifications">
       <T v="label" color={colors.inkFaint} style={{ marginBottom: 6, marginTop: 2 }}>
-        PEOPLE
+        FOR YOU
       </T>
-      {shown.map((i) => {
-        const u = repo.user(i.actor_id!);
-        const name = u?.displayName.split(' ')[0] ?? 'Someone';
-        return (
-          <Tap key={i.id} onPress={() => onOpen(i.actor_id!)} scaleTo={0.98} style={[styles.row, { marginBottom: 8 }]} accessibilityLabel={socialLine(i.kind, name)} testID="social-row">
-            <View>
-              <Avatar uri={u?.avatar} name={u?.displayName ?? name} size={44} />
-              {!i.seen_at ? <View style={styles.newDot} /> : null}
-            </View>
-            <View style={{ flex: 1, marginLeft: 12 }}>
-              <T v="subhead" weight="700" numberOfLines={2}>
-                {socialLine(i.kind, name)}
-              </T>
-              <T v="caption" color={colors.inkFaint} weight="500" style={{ marginTop: 2 }}>
-                {timeAgo(Date.parse(i.created_at))}
-              </T>
-            </View>
-          </Tap>
-        );
-      })}
+      {lines.map((l) => (
+        <Tap key={l.id} onPress={() => onOpen(hrefFor(l.ref))} scaleTo={0.98} style={[styles.row, { marginBottom: 8 }]} accessibilityLabel={l.text} testID="social-row">
+          <View>
+            {l.round ? <Avatar uri={l.image} name={l.person ? repo.user(l.person)?.displayName : undefined} size={44} /> : <Img uri={l.image} style={{ width: 44, height: 44, borderRadius: 12 }} />}
+            {l.fresh ? <View style={styles.newDot} /> : null}
+          </View>
+          <View style={{ flex: 1, marginLeft: 12 }}>
+            <T v="subhead" weight="700" numberOfLines={2}>
+              {l.text}
+            </T>
+            <T v="caption" color={colors.inkFaint} weight="500" style={{ marginTop: 2 }}>
+              {timeAgo(l.at)}
+            </T>
+          </View>
+        </Tap>
+      ))}
     </View>
   );
 }

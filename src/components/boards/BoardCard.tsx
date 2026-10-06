@@ -9,6 +9,7 @@ import { CategoryIcon } from '@/components/ui/CategoryIcon';
 import { Img } from '@/components/ui/Img';
 import { FreshBadge } from '@/components/ui/misc';
 import { Tap } from '@/components/ui/Tap';
+import { openWorldActions } from '@/components/worlds/WorldActionSheet';
 import { T } from '@/components/ui/Text';
 import { CATEGORIES } from '@/data/interests';
 import { useFresh } from '@/hooks/useGraph';
@@ -47,7 +48,7 @@ function MagazineCard({ board, width = 170, reason, showSave }: Props & { showSa
   const cat = CATEGORIES.find((c) => c.id === board.category)?.label ?? '';
 
   return (
-    <Tap onPress={() => router.push(`/board/${board.id}`)} scaleTo={0.975} accessibilityLabel={`Open ${board.title}${fresh ? `, ${fresh} new` : ''}`} style={[{ height: h, width }, styles.mag, shadow.md]}>
+    <Tap onPress={() => router.push(`/board/${board.id}`)} onLongPress={() => openWorldActions(board.id)} delayLongPress={380} accessibilityHint="Long-press to pin" scaleTo={0.975} accessibilityLabel={`Open ${board.title}${fresh ? `, ${fresh} new` : ''}`} style={[{ height: h, width }, styles.mag, shadow.md]}>
       <View style={[StyleSheet.absoluteFill, styles.magClip]}>
         <Img uri={board.cover} style={StyleSheet.absoluteFill} tint={dark ? '#1a0f14' : colors.bgSoft} />
         <LinearGradient colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.12)', 'rgba(0,0,0,0.72)']} locations={[0, 0.42, 1]} style={StyleSheet.absoluteFill} />
@@ -111,6 +112,9 @@ function ClassicCard({ board, variant = 'wide', width, reason, latest }: Props) 
   return (
     <Tap
       onPress={() => router.push(`/board/${board.id}`)}
+      onLongPress={() => openWorldActions(board.id)}
+      delayLongPress={380}
+      accessibilityHint="Long-press to pin"
       scaleTo={0.975}
       accessibilityLabel={`Open ${board.title}`}
       style={[{ height: h, width }, styles.card, shadow.md]}

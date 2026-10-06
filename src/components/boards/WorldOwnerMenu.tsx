@@ -6,6 +6,7 @@ import { ActivityIndicator, Modal, Pressable, StyleSheet, View } from 'react-nat
 import { useDeviceInsets } from '@/components/system/SafeArea';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
+import { WORLD_DELETE_FAILED, WORLD_DELETE_NOT_OWNER } from '@/services/backend/content';
 import { deleteMyWorld } from '@/services/backend/ownContent';
 import { repo } from '@/services/repository';
 import { colors, radius } from '@/theme';
@@ -40,7 +41,11 @@ export function WorldOwnerMenu({ board, open, onClose }: { board: Board; open: b
       router.replace('/boards');
     } catch (e) {
       setBusy(false);
-      setError(e instanceof Error ? e.message : String(e));
+      // Only our own, readable messages reach the person; anything else (a raw
+      // platform / network error) becomes the plain retry message.
+      const msg = e instanceof Error ? e.message : '';
+      if (__DEV__ && msg !== WORLD_DELETE_FAILED && msg !== WORLD_DELETE_NOT_OWNER) console.warn('[chimp:world] delete failed', msg.slice(0, 160));
+      setError(msg === WORLD_DELETE_NOT_OWNER ? msg : WORLD_DELETE_FAILED);
     }
   };
 

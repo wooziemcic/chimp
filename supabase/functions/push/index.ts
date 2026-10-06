@@ -57,6 +57,12 @@ export interface ExpoMessage {
   priority: 'high';
   /** Ask Expo/APNs to drop a push that couldn't be delivered within a day. */
   ttl: number;
+  /**
+   * Phase 9: iOS `content-available` — lets iOS wake Chimp briefly in the
+   * background so the recipient's phone can acknowledge "Delivered" itself
+   * (never Seen). Only on message pushes; the alert is shown as before.
+   */
+  contentAvailable?: true;
 }
 
 export type Ticket = { status: 'ok'; id: string } | { status: 'error'; message?: string; details?: { error?: string } };
@@ -85,7 +91,16 @@ export function toExpoMessages(rows: OutboxRow[]): { msg: ExpoMessage; rowId: st
       out.push({
         rowId: r.id,
         // `for`: the account it was meant for — a phone that has since switched accounts ignores the tap.
-        msg: { to: token, title: r.title, body: r.body, data: { ...(r.data ?? {}), kind: payloadKind(r.kind), for: r.user_id }, sound: 'default', priority: 'high', ttl: 86_400 },
+        msg: {
+          to: token,
+          title: r.title,
+          body: r.body,
+          data: { ...(r.data ?? {}), kind: payloadKind(r.kind), for: r.user_id },
+          sound: 'default',
+          priority: 'high',
+          ttl: 86_400,
+          ...(r.kind === 'MESSAGE_RECEIVED' ? { contentAvailable: true as const } : {}),
+        },
       });
     }
   }
@@ -100,7 +115,10 @@ export function chunk<T>(list: T[], size = BATCH): T[][] {
 
 /** After Dark kinds travel as a neutral word, even in the hidden payload. */
 const AFTER_DARK_KINDS = new Set(['AFTER_DARK_MESSAGE', 'MUTUAL_CRUSH', 'VIBE_REQUEST', 'VIBE_ACCEPTED', 'CHALLENGE_YOUR_TURN', 'PLAN_WAITING_FOR_YOU']);
-export const payloadKind = (kind: string) => (AFTER_DARK_KINDS.has(kind) ? 'after_dark' : kind === 'MESSAGE_RECEIVED' ? 'message' : 'connection');
+/** Phase 9 (0012): likes, replies and World activity. */
+const ACTIVITY_KINDS = new Set(['CONTENT_LIKED', 'CONTENT_COMMENTED', 'THREAD_REPLY', 'WORLD_ACTIVITY', 'WORLD_JOIN']);
+export const payloadKind = (kind: string) =>
+  AFTER_DARK_KINDS.has(kind) ? 'after_dark' : kind === 'MESSAGE_RECEIVED' ? 'message' : ACTIVITY_KINDS.has(kind) ? 'activity' : 'connection';
 
 const RETRYABLE = new Set(['MessageRateExceeded', 'ExpoError', 'ProviderError']);
 

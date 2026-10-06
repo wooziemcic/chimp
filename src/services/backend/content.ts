@@ -672,27 +672,54 @@ export async function deleteComment(id: string): Promise<void> {
 
 // ─── Phase 6D (final): delete a World you own ───────────────────────────────
 
+/** What the person sees when a delete didn't happen (details stay in dev logs). */
+export const WORLD_DELETE_FAILED = 'Couldn’t delete this World. Please try again.';
+export const WORLD_DELETE_NOT_OWNER = 'Only the World’s owner can delete it.';
+
 /**
- * Delete one of your Worlds. The delete-world Edge Function runs
- * delete_world() AS YOU (the database refuses anyone but the owner), then
- * removes the World's files from Storage. Throws, changing nothing, if the
- * server didn't delete it.
+ * Delete one of your Worlds.
+ *
+ * Phase 9 fix (release blocker: "Edge Function returned a non-2xx status
+ * code"). The deletion itself is now ONE database call made as you:
+ * delete_world() (0005/0008) checks auth.uid() = owner and removes the World
+ * and everything that belongs to it in a single transaction — it either all
+ * happens or nothing does. It no longer depends on the Edge Function: that
+ * function's gateway (JWT verification), deployment or configuration could
+ * fail before our code ran, and its error body was never readable, so the
+ * person saw the raw platform message and nothing was deleted.
+ *
+ * Storage clean-up follows, best effort: the files delete_world() removed are
+ * queued in storage_cleanup (never lost), and the delete-world function (now
+ * an idempotent clean-up worker) removes them. If it isn't reachable, the
+ * World is still deleted and the files wait in the queue.
  */
 export async function deleteWorld(boardId: string): Promise<void> {
-  const { data, error } = await sb().functions.invoke('delete-world', { body: { boardId } });
+  const { error } = await sb().rpc('delete_world', { p_board_id: boardId });
   if (error) {
-    let detail = error.message;
-    try {
-      const ctx = (error as { context?: Response }).context;
-      if (ctx && typeof ctx.json === 'function') detail = ((await ctx.json()) as { error?: string }).error ?? detail;
-    } catch {
-      /* keep the generic message */
-    }
-    if (/not found|404|failed to send/i.test(detail)) detail = 'Deleting Worlds isn’t set up on the server yet (the delete-world function). Nothing was deleted.';
-    throw new Error(detail);
+    if (__DEV__) console.warn('[chimp:world] delete_world failed', { code: error.code, message: error.message.slice(0, 160) });
+    const denied = error.code === '42501' && /owner/i.test(error.message);
+    throw new Error(denied ? WORLD_DELETE_NOT_OWNER : WORLD_DELETE_FAILED);
   }
-  const r = (data ?? {}) as { ok?: boolean; error?: string };
-  if (!r.ok) throw new Error(r.error ?? 'The World wasn’t deleted. Try again.');
+  void cleanUpWorldFiles(boardId);
+}
+
+/** Best effort: ask the delete-world function to remove the deleted World's files. Never throws. */
+export async function cleanUpWorldFiles(boardId: string): Promise<void> {
+  try {
+    const { error } = await sb().functions.invoke('delete-world', { body: { boardId } });
+    if (error && __DEV__) {
+      const ctx = (error as { context?: Response }).context;
+      let body = '';
+      try {
+        body = ctx && typeof ctx.text === 'function' ? (await ctx.text()).slice(0, 200) : '';
+      } catch {
+        /* unreadable */
+      }
+      console.warn('[chimp:world] storage clean-up deferred (files stay queued)', { status: ctx?.status, body });
+    }
+  } catch (e) {
+    if (__DEV__) console.warn('[chimp:world] storage clean-up deferred', String(e).slice(0, 120));
+  }
 }
 
 /**
@@ -704,4 +731,27 @@ export async function worldStillExists(boardId: string): Promise<boolean> {
   const res = await sb().from('boards').select('id').eq('id', boardId).maybeSingle();
   if (res.error) return true;
   return !!res.data;
+}
+
+// ─── Phase 9: pinned Worlds (board_pins, 0012) ──────────────────────────────
+
+export interface PinRow {
+  board_id: string;
+  pinned_at: string;
+}
+
+/** My pins (null = this server has no pins yet: 0012 not applied). */
+export async function fetchMyPins(uid: string): Promise<PinRow[] | null> {
+  const { data, error } = await sb().from('board_pins').select('board_id,pinned_at').eq('user_id', uid).order('pinned_at', { ascending: false }).limit(50);
+  if (error) return null;
+  return (data ?? []) as PinRow[];
+}
+
+/** Pin / unpin (idempotent). The server refuses Worlds you can't see and caps the number. */
+export async function setBoardPin(boardId: string, on: boolean): Promise<void> {
+  const { error } = await sb().rpc('set_board_pin', { p_board_id: boardId, p_on: on });
+  if (!error) return;
+  if (error.code === 'PGRST202') throw new Error('Pinning isn’t available on this server yet.');
+  if (error.code === '54000') throw new Error(error.message);
+  throw new Error(on ? 'Couldn’t pin this World. Try again.' : 'Couldn’t unpin this World. Try again.');
 }

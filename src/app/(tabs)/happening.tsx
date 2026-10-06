@@ -1,334 +1,477 @@
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { Activity, CalendarDays, ChevronRight, Heart, Link2, Sparkles, Target, Users } from 'lucide-react-native';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { FlatList, ScrollView, StyleSheet, View } from 'react-native';
+import { Check, ChevronRight, Pin, UserPlus } from 'lucide-react-native';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AddStoryBubble } from '@/components/create/CreateButton';
-import { HappeningGraph } from '@/components/happening/HappeningGraph';
-import { NodePanel } from '@/components/happening/NodePanel';
-import { MoveCard } from '@/components/moves/MoveCard';
 import { StoryBubble } from '@/components/stories/StoryBubble';
 import { Avatar } from '@/components/ui/Avatar';
 import { AvatarStack } from '@/components/ui/AvatarStack';
 import { Img } from '@/components/ui/Img';
-import { EmptyState, SectionHeader } from '@/components/ui/misc';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import { rankMoves } from '@/graph/relevance';
-import { buildHappeningGraph, type HNode } from '@/graph/happening';
-import { type LiveItem, buildLiveActivity } from '@/graph/live';
-import { buildHappening, driftStories, isNightRef } from '@/graph/surfaces';
-import { freshCount } from '@/graph/touch';
+import { openWorldActions } from '@/components/worlds/WorldActionSheet';
+import { type ChangeLine, type NowCard, changedSince, happeningNow, peopleToKnow, pinnedWorlds, storiesRow } from '@/graph/happeningNow';
 import { useGraphCtx } from '@/hooks/useGraph';
-import { useImpression } from '@/hooks/useImpression';
 import { useTabBarSpace } from '@/hooks/useLayout';
 import { useNow } from '@/hooks/useNow';
-import { ds, useDataset } from '@/services/dataset';
+import { fetchPeople } from '@/services/backend/content';
+import { toUser } from '@/services/backend/mappers';
+import * as realData from '@/services/backend/realData';
+import { useDataset } from '@/services/dataset';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
-import { useExposure } from '@/store/useExposure';
+import { useHappening } from '@/store/useHappening';
+import { usePins } from '@/store/usePins';
+import { useSocialInbox } from '@/store/useSocialInbox';
 import { colors, radius, shadow } from '@/theme';
-import type { HappeningItem, HappeningKind } from '@/types/models';
+import type { Board } from '@/types/models';
+import { compact, timeAgo } from '@/utils/format';
 import { hrefFor } from '@/utils/links';
 import { pushOnce } from '@/utils/nav';
 
-const KIND: Record<HappeningKind, { label: string; Icon: typeof Sparkles }> = {
-  move: { label: 'MOVE', Icon: CalendarDays },
-  plan: { label: 'YOUR PLAN', Icon: CalendarDays },
-  people: { label: 'PEOPLE', Icon: Users },
-  match: { label: 'SUGGESTED MATCH', Icon: Link2 },
-  spark: { label: 'MUTUAL CRUSH', Icon: Heart },
-  loop: { label: 'OPEN LOOP', Icon: Target },
-  change: { label: 'WHAT CHANGED', Icon: Sparkles },
-};
+/** Selective gold: pins only. */
+const GOLD = '#A77B1E';
 
 /**
- * Happening — "What is moving across your world right now?"
- * Chimp's Opportunity Graph / situational-awareness surface. Not a feed
- * (Phase 6C: the visual stream moved to Buzz → Drift):
- *   1. the Opportunity Graph — endless, cyclic, collision-free lanes
- *   2. Friends & Connections — your story, friends' stories, Worlds' stories
- *   3. Live across your graph — what's moving (real events only)
- *   4. Changed in your world — the few deltas that matter most now, each with its
- *      reason (Phase 7C: ranked by decomposed signals; the selection and its
- *      signals are kept for Graph Debug)
- *   5. Moves tied to your Worlds
- * Never After Dark.
+ * Happening (Phase 9) — "What changed that matters".
+ *
+ *   Stories · Pinned Worlds · Happening Now (3–5) · People you may want to
+ *   know · Changed since you were here
+ *
+ * Built only from real events (graph/happeningNow.ts, deterministic and
+ * documented there). With a small network the sections get shorter; nothing
+ * is invented to fill space. Never After Dark.
  */
 export default function HappeningScreen() {
+  const params = useLocalSearchParams<{ section?: string }>();
   const ctx = useGraphCtx();
-  const seen = useChimp((s) => s.seenStoryItems);
-  const bottom = useTabBarSpace();
-  const focus = useChimp((st) => st.happeningFocus);
-  const exploreBranch = useChimp((st) => st.exploreBranch);
-  const collapseBranch = useChimp((st) => st.collapseBranch);
-  const [selected, setSelected] = useState<string | null>(null);
-
-  const items = useMemo(() => buildHappening(ctx).slice(0, 3), [ctx]);
-  // Phase 7C: keep why each change was selected (signals, reasons) — local, for Graph Debug.
-  useEffect(() => {
-    useExposure.getState().logSelections(
-      ds().me.id,
-      items.filter((it) => it.selection).map((it) => ({
-        key: `${it.ref.kind}:${it.ref.id}`,
-        at: ctx.now,
-        total: it.selection!.total,
-        signals: it.selection!.signals,
-        penalties: it.selection!.penalties,
-        why: it.why,
-      })),
-    );
-  }, [items, ctx.now]);
-  const now = useNow();
-  const live = useMemo(() => buildLiveActivity(ctx, seen, now), [ctx, seen, now]);
-  const stories = useMemo(() => driftStories(ctx, seen), [ctx, seen]);
   const data = useDataset();
-  const myStory = useMemo(() => data.stories.find((st) => st.owner.kind === 'person' && st.owner.id === data.me.id), [data]);
-  const graph = useMemo(() => buildHappeningGraph(ctx, focus), [ctx, focus]);
-  const selectedNode = graph.nodes.find((n) => n.id === selected);
+  const real = data.mode === 'real';
+  const owner = real ? data.me.id : 'demo';
+  const bottom = useTabBarSpace();
+  const now = useNow();
+  const seen = useChimp((s) => s.seenStoryItems);
+  const followedBoards = useChimp((s) => s.followedBoards ?? {});
+  const pins = usePins((s) => s.pins);
+  const pinsOwner = usePins((s) => s.owner);
+  const events = useSocialInbox((s) => s.items);
+  const suggestions = useHappening((s) => (s.suggestionsFor === owner ? s.suggestions : null));
+  const lastVisit = useHappening((s) => s.seenAt[owner] ?? 0);
+  // The "since you were here" line is fixed for this visit (dots stay while you look).
+  const [visitFrom, setVisitFrom] = useState<{
+    owner: string;
+    at: number;
+  } | null>(null);
+  const since = visitFrom?.owner === owner ? visitFrom.at : lastVisit;
 
-  const toggleBranch = useCallback(
-    (worldId: string) => {
-      const w = graph.nodes.find((n) => n.id === worldId);
-      if (!w) return;
-      if (focus === worldId) collapseBranch();
-      else exploreBranch(worldId, { kind: 'interest', id: w.interests[0] });
-    },
-    [graph.nodes, focus, collapseBranch, exploreBranch],
+  // People followed from this list stay on it (as "Following") until you leave Happening.
+  const [followedHere, setFollowedHere] = useState<{
+    owner: string;
+    ids: ReadonlySet<string>;
+  }>({ owner, ids: new Set() });
+  const scroller = useRef<ScrollView>(null);
+  const peopleY = useRef(0);
+
+  useFocusEffect(
+    useCallback(() => {
+      // The Demo keeps its pins on this phone.
+      if (!real && usePins.getState().owner !== 'demo') void usePins.getState().load('demo', false);
+      setVisitFrom({ owner, at: useHappening.getState().seenAt[owner] ?? 0 });
+      void useHappening
+        .getState()
+        .loadSuggestions(owner, real)
+        .then(async (ids) => {
+          const unknown = ids.filter((id) => !repo.user(id));
+          if (!unknown.length) return;
+          const rows = await fetchPeople(unknown).catch(() => []);
+          if (rows.length) realData.addPeople(rows.map(toUser));
+        });
+      return () => {
+        useHappening.getState().markSeen(owner, Date.now());
+        setFollowedHere({ owner, ids: new Set() });
+      };
+    }, [owner, real]),
   );
-  const onSelect = useCallback(
-    (n: HNode) => {
-      if (n.tier === 'major') {
-        // Tap a World: it grows, its links light up and its branch opens. Tap again to close.
-        if (selected === n.id) {
-          setSelected(null);
-          if (focus === n.id) collapseBranch();
-          return;
-        }
-        setSelected(n.id);
-        if (focus !== n.id) exploreBranch(n.id, { kind: 'interest', id: n.interests[0] });
-        return;
-      }
-      setSelected(selected === n.id ? null : n.id);
-    },
-    [selected, focus, collapseBranch, exploreBranch],
-  );
-  // Moves live here now, but only ones tied to your Worlds, plans or loops.
-  const moves = useMemo(
+
+  const stories = useMemo(() => storiesRow(ctx, seen, now), [ctx, seen, now]);
+  // (Re-derived when the dataset changes: a World you can no longer see drops out.)
+  const pinned = useMemo(() => (pinsOwner === owner && data.boards.length ? pinnedWorlds(ctx, pins) : []), [ctx, pins, pinsOwner, owner, data.boards]);
+  const cards = useMemo(
     () =>
-      rankMoves(ctx, (m) => !isNightRef({ kind: 'move', id: m.id }))
-        .filter((x) => x.reasons.some((r) => r.kind === 'board' || r.kind === 'saved' || r.kind === 'loop' || r.kind === 'people' || r.kind === 'plan'))
-        .map((x) => x.item),
-    [ctx],
+      happeningNow(ctx, {
+        pins: pinsOwner === owner ? pins : {},
+        followedBoards,
+        now,
+      }),
+    [ctx, pins, pinsOwner, owner, followedBoards, now],
   );
+  const keep = followedHere.owner === owner ? followedHere.ids : undefined;
+  const people = useMemo(() => peopleToKnow(ctx, suggestions, now, 6, keep), [ctx, suggestions, now, keep]);
+  const onFollowed = (id: string) =>
+    setFollowedHere((f) => ({
+      owner,
+      ids: new Set([...(f.owner === owner ? f.ids : []), id]),
+    }));
+  const changes = useMemo(() => changedSince(ctx, events, since, now), [ctx, events, since, now]);
 
-  // Friends & connections, those with something new first (blue dot).
-  const friends = useMemo(() => {
-    const ids = [...new Set([...Object.keys(ctx.s.connections), ...Object.keys(ctx.s.following)])].filter((id) => !ctx.s.blocked[id] && repo.user(id));
-    const fresh = (id: string) => {
-      const story = repo.storiesFor({ kind: 'person', id })[0];
-      const unseenStory = story && !isNightRef({ kind: 'story', id: story.id }) && story.items.some((i) => !seen[i.id]);
-      return unseenStory || freshCount(ctx.s.changes, { kind: 'person', id }) > 0;
-    };
-    const withStory = new Set(stories.friends.map((st) => st.owner.id));
-    return ids
-      .filter((id) => !withStory.has(id))
-      .map((id) => ({ id, fresh: fresh(id) }))
-      .sort((a, b) => Number(b.fresh) - Number(a.fresh) || Number(!!ctx.s.connections[b.id]) - Number(!!ctx.s.connections[a.id]))
-      .slice(0, 7);
-  }, [ctx, seen, stories.friends]);
+  const onLayoutPeople = (y: number) => {
+    peopleY.current = y;
+    if (params.section === 'people')
+      setTimeout(
+        () =>
+          scroller.current?.scrollTo({
+            y: Math.max(0, y - 12),
+            animated: true,
+          }),
+        250,
+      );
+  };
+  const quiet = !cards.length;
 
   return (
     <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg }}>
       <StatusBar style="dark" />
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: bottom }}>
-        <PageHeader title="Happening" subtitle="What’s moving across your world right now" />
+      <ScrollView ref={scroller} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: bottom }} testID="happening">
+        <PageHeader title="Happening" subtitle="What changed that matters" />
 
-        <HappeningGraph graph={graph} selected={selected} onSelect={onSelect} />
-        {selectedNode ? (
-          <NodePanel node={selectedNode} world={graph.nodes.filter((n) => n.id === selectedNode.worldId).map((n) => ({ id: n.id, label: n.label }))[0]} focus={graph.focus} onExplore={toggleBranch} onClose={() => setSelected(null)} />
-        ) : (
-          <T v="caption" color={colors.inkFaint} weight="500" align="center" style={{ marginTop: 2 }}>
-            Swipe across your graph · tap a World to open its branch
+        {/* A. Stories: yours first. */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.stories} testID="happening-stories">
+          {stories.mine ? <StoryBubble story={stories.mine} size={62} lane="friend" label="Your story" /> : <AddStoryBubble size={62} />}
+          {stories.others.map((st) => (
+            <StoryBubble key={st.id} story={st} size={62} lane={st.lane} label={st.owner.kind === 'person' ? (repo.user(st.owner.id)?.displayName.split(' ')[0] ?? st.title) : st.title} />
+          ))}
+        </ScrollView>
+        {!stories.others.length ? (
+          <T v="caption" color={colors.inkFaint} style={{ paddingHorizontal: 20, marginTop: -2 }}>
+            Stories from people you follow show up here for 24 hours.
           </T>
-        )}
-
-        {/* Friends & Connections: your story, friends' stories, then people without one, then your Worlds' stories. */}
-        <View style={styles.friends}>
-          <Tap onPress={() => pushOnce('/people?view=connections')} style={styles.friendsHead} accessibilityLabel="All connections">
-            <T v="subhead" weight="700" style={{ flex: 1 }}>
-              Friends & Connections
-            </T>
-            <ChevronRight size={16} color={colors.inkMuted} />
-          </Tap>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 2, alignItems: 'flex-start' }}>
-            <AddStoryBubble />
-            {myStory ? <StoryBubble story={myStory} size={60} lane="friend" label="You" /> : null}
-            {stories.friends.map((st) => (
-              <StoryBubble key={st.id} story={st} size={60} lane="friend" label={st.title.split(' ')[0]} />
-            ))}
-            {friends.map((item) => {
-              const u = repo.user(item.id);
-              if (!u) return null;
-              return (
-                <Tap key={u.id} onPress={() => pushOnce(`/profile/${u.id}`)} scaleTo={0.94} style={styles.friend} accessibilityLabel={`${u.displayName}${item.fresh ? ', something new' : ''}`}>
-                  <View>
-                    <Avatar uri={u.avatar} name={u.displayName} size={52} />
-                    {item.fresh ? <View style={styles.freshDot} /> : null}
-                  </View>
-                  <T v="caption" weight="600" numberOfLines={1} style={{ marginTop: 6, fontSize: 11.5 }}>
-                    {u.displayName.split(' ')[0]}
-                  </T>
-                </Tap>
-              );
-            })}
-            {stories.trending.slice(0, 8).map((st) => (
-              <StoryBubble key={st.id} story={st} size={60} lane="trending" label={st.title} />
-            ))}
-          </ScrollView>
-          {!stories.friends.length && !friends.length ? (
-            <T v="footnote" color={colors.inkMuted} style={{ marginTop: 6 }}>
-              Follow or connect with people and their stories show up here.
-            </T>
-          ) : null}
-        </View>
-
-        {/* Live across your graph: what's moving (the media itself lives in Buzz → Drift). */}
-        <View style={styles.listHead}>
-          <Activity size={16} color={colors.accent} />
-          <T v="eyebrow" color={colors.inkMuted} style={{ marginLeft: 8 }}>
-            LIVE ACROSS YOUR GRAPH
-          </T>
-        </View>
-        {live.length ? (
-          <View style={[styles.liveCard, shadow.sm]}>
-            {live.map((it, k) => (
-              <LiveRow key={it.id} item={it} first={k === 0} />
-            ))}
-          </View>
-        ) : (
-          <T v="footnote" color={colors.inkMuted} style={{ paddingHorizontal: 20 }}>
-            Quiet right now. When people post in your Worlds, join them or add Stories, it shows up here.
-          </T>
-        )}
-
-        <View style={styles.listHead}>
-          <Sparkles size={16} color={colors.accent} />
-          <T v="eyebrow" color={colors.inkMuted} style={{ marginLeft: 8 }}>
-            CHANGED IN YOUR WORLD
-          </T>
-        </View>
-        {items.length ? (
-          <View style={{ paddingHorizontal: 16, gap: 10 }} testID="happening-changed">
-            {items.map((it) => (
-              <HappeningCard key={it.id} item={it} />
-            ))}
-          </View>
-        ) : (
-          <EmptyState title="Nothing specific yet" body="Join Worlds, open a loop or follow people. Happening only shows things with real context." />
-        )}
-
-        {moves.length ? (
-          <View style={{ marginTop: 24 }}>
-            <SectionHeader title="Moves in your Worlds" subtitle="Each one says why it’s here" style={{ paddingHorizontal: 20, marginBottom: 8 }} />
-            <FlatList
-              horizontal
-              data={moves}
-              keyExtractor={(m) => m.id}
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ paddingHorizontal: 16, gap: 8 }}
-              renderItem={({ item }) => <MoveCard move={item} width={136} height={198} />}
-            />
-          </View>
         ) : null}
 
+        {/* B. Pinned Worlds. */}
+        <SectionTitle title="Pinned" />
+        {pinned.length ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }} testID="happening-pinned">
+            {pinned.map((b) => (
+              <PinnedWorld key={b.id} board={b} />
+            ))}
+          </ScrollView>
+        ) : (
+          <View style={styles.hint} testID="pinned-empty">
+            <Pin size={15} color={GOLD} />
+            <T v="footnote" color={colors.inkMuted} style={{ marginLeft: 8, flex: 1 }}>
+              Long-press any World to pin it here.
+            </T>
+          </View>
+        )}
+
+        {/* C. Happening Now. */}
+        <SectionTitle title="Happening now" />
+        {cards.length ? (
+          <View style={{ paddingHorizontal: 16, gap: 10 }} testID="happening-now">
+            {cards.map((c) => (
+              <NowRow key={c.id} card={c} />
+            ))}
+          </View>
+        ) : (
+          <View style={styles.quiet} testID="happening-quiet">
+            <T v="subhead" weight="700">
+              Nothing major has changed yet.
+            </T>
+            <T v="footnote" color={colors.inkMuted} style={{ marginTop: 2 }}>
+              When people post in your Worlds, join them or follow you, it shows up here.
+            </T>
+          </View>
+        )}
+
+        {/* D. People you may want to know. */}
+        <View onLayout={(e) => onLayoutPeople(e.nativeEvent.layout.y)}>
+          <SectionTitle title="People you may want to know" action={{ label: 'Search', onPress: () => router.push('/search') }} />
+          {people.length ? (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }} testID="happening-people">
+              {people.map((p) => (
+                <PersonCard key={p.personId} id={p.personId} line={p.line} onFollowed={onFollowed} />
+              ))}
+            </ScrollView>
+          ) : (
+            <Tap onPress={() => router.push('/search')} style={styles.hint} accessibilityLabel="Find people" testID="people-empty">
+              <UserPlus size={15} color={colors.accent} />
+              <T v="footnote" color={colors.inkMuted} style={{ marginLeft: 8, flex: 1 }}>
+                Find people by name or @username.
+              </T>
+              <ChevronRight size={16} color={colors.inkFaint} />
+            </Tap>
+          )}
+        </View>
+
+        {/* E. Changed since you were here. */}
+        {changes.length ? (
+          <>
+            <SectionTitle title="Changed since you were here" />
+            <View style={[styles.list, shadow.sm]} testID="happening-changed">
+              {changes.map((c, i) => (
+                <ChangeRow key={c.id} line={c} first={i === 0} />
+              ))}
+            </View>
+          </>
+        ) : quiet ? null : (
+          <T v="caption" color={colors.inkFaint} align="center" style={{ marginTop: 22 }}>
+            You’re up to date.
+          </T>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function LiveRow({ item, first }: { item: LiveItem; first: boolean }) {
+function SectionTitle({ title, action }: { title: string; action?: { label: string; onPress: () => void } }) {
   return (
-    <Tap onPress={() => pushOnce(hrefFor(item.ref))} scaleTo={0.985} style={[styles.liveRow, !first && styles.liveDivider]} accessibilityLabel={`${item.title}${item.body ? `. ${item.body}` : ''}`}>
-      <Img uri={item.image} style={[styles.liveImg, item.round && { borderRadius: 22 }]} />
-      <View style={{ flex: 1, marginLeft: 12 }}>
-        <T v="subhead" weight="700" numberOfLines={2}>
-          {item.title}
-        </T>
-        {item.body ? (
-          <T v="caption" color={colors.inkMuted} weight="500" numberOfLines={1} style={{ marginTop: 1 }}>
-            {item.body}
+    <View style={styles.sectionHead}>
+      <T v="headline" style={{ flex: 1 }}>
+        {title}
+      </T>
+      {action ? (
+        <Tap onPress={action.onPress} style={styles.sectionAction} accessibilityLabel={action.label}>
+          <T v="footnote" weight="700" color={colors.accent}>
+            {action.label}
           </T>
-        ) : null}
+        </Tap>
+      ) : null}
+    </View>
+  );
+}
+
+function PinnedWorld({ board }: { board: Board }) {
+  const owner = board.ownerId && !repo.isMe(board.ownerId) ? repo.user(board.ownerId) : undefined;
+  const members = board.memberCount;
+  return (
+    <Tap
+      onPress={() => pushOnce(`/board/${board.id}`)}
+      onLongPress={() => openWorldActions(board.id)}
+      delayLongPress={380}
+      scaleTo={0.97}
+      style={[styles.pin, shadow.sm]}
+      accessibilityLabel={`${board.title}, pinned${owner?.username ? `, by @${owner.username}` : ''}`}
+      accessibilityHint="Long-press to unpin"
+      testID={`pinned-${board.id}`}
+    >
+      <Img uri={board.cover} style={styles.pinCover} />
+      <View style={styles.pinBadge}>
+        <Pin size={11} color={GOLD} fill={GOLD} />
       </View>
-      {item.people && item.people.length > 1 ? <AvatarStack userIds={item.people} size={22} max={3} /> : null}
+      <View style={{ padding: 10 }}>
+        <T v="subhead" weight="700" numberOfLines={1}>
+          {board.title}
+        </T>
+        <T v="caption" color={colors.inkMuted} numberOfLines={1}>
+          {repo.isMe(board.ownerId) ? 'Your World' : owner?.username ? `by @${owner.username}` : board.ownerId ? 'A member’s World' : 'Chimp World'}
+          {members ? ` · ${compact(members)}` : ''}
+        </T>
+      </View>
+    </Tap>
+  );
+}
+
+function NowRow({ card }: { card: NowCard }) {
+  return (
+    <Tap onPress={() => pushOnce(hrefFor(card.ref))} scaleTo={0.985} style={[styles.now, shadow.sm]} accessibilityLabel={`${card.title}. ${card.why}`} testID="now-card">
+      <Img uri={card.image} style={styles.nowImg} />
+      <View style={{ flex: 1, marginLeft: 12, minWidth: 0 }}>
+        <T v="bodyStrong" numberOfLines={2} style={{ lineHeight: 21 }}>
+          {card.title}
+        </T>
+        <T v="caption" color={colors.inkMuted} numberOfLines={1} style={{ marginTop: 2 }}>
+          {`${card.why} · ${timeAgo(card.at)}`}
+        </T>
+      </View>
+      {card.people.length > 1 ? <AvatarStack userIds={card.people} size={22} max={3} /> : null}
       <ChevronRight size={16} color={colors.inkFaint} style={{ marginLeft: 6 }} />
     </Tap>
   );
 }
 
-function HappeningCard({ item }: { item: HappeningItem }) {
-  useImpression(`happening:${item.ref.kind}:${item.ref.id}`);
-  const k = KIND[item.kind];
-  const round = item.ref.kind === 'person';
+function PersonCard({ id, line, onFollowed }: { id: string; line: string; onFollowed: (id: string) => void }) {
+  const u = repo.user(id);
+  const following = useChimp((s) => !!s.following[id]);
+  const toggleFollow = useChimp((s) => s.toggleFollow);
+  if (!u) return null;
   return (
-    <Tap onPress={() => pushOnce(hrefFor(item.ref))} scaleTo={0.985} style={[styles.card, shadow.sm]} accessibilityLabel={`${item.title}. ${item.why.join('. ')}`}>
-      <View style={{ flexDirection: 'row' }}>
-        {item.image ? (
-          <Img uri={item.image} style={[styles.thumb, round && { borderRadius: 29 }]} />
-        ) : (
-          <View style={[styles.thumb, styles.iconThumb]}>
-            <k.Icon size={24} color={colors.accent} />
-          </View>
-        )}
-        <View style={{ flex: 1, marginLeft: 12 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <k.Icon size={12} color={item.kind === 'spark' ? '#FF3D6E' : colors.accent} />
-            <T v="caption" color={item.kind === 'spark' ? '#FF3D6E' : colors.accent} weight="800" style={{ marginLeft: 5, letterSpacing: 0.6 }}>
-              {k.label}
-            </T>
-          </View>
-          <T v="bodyStrong" style={{ marginTop: 3, lineHeight: 21 }}>
-            {item.title}
-          </T>
-          {item.body ? (
-            <T v="footnote" color={colors.inkMuted} weight="400" style={{ marginTop: 2 }} numberOfLines={2}>
-              {item.body}
-            </T>
-          ) : null}
-        </View>
-        <ChevronRight size={18} color={colors.inkFaint} style={{ marginLeft: 6, marginTop: 20 }} />
+    <Tap
+      onPress={() => pushOnce(`/profile/${id}`)}
+      scaleTo={0.97}
+      style={[styles.person, shadow.sm]}
+      accessibilityLabel={`${u.displayName}${u.username ? `, @${u.username}` : ''}. ${line}`}
+      testID={`person-${id}`}
+    >
+      <Avatar uri={u.avatar} name={u.displayName} size={56} />
+      <T v="subhead" weight="700" numberOfLines={1} style={{ marginTop: 8 }}>
+        {u.displayName}
+      </T>
+      <T v="caption" color={colors.inkMuted} numberOfLines={1}>
+        {u.username ? `@${u.username}` : ' '}
+      </T>
+      <T v="caption" color={colors.ink2} numberOfLines={2} align="center" style={{ marginTop: 6, minHeight: 32 }}>
+        {line}
+      </T>
+      <Tap
+        onPress={() => {
+          onFollowed(id);
+          toggleFollow(id);
+        }}
+        haptic="light"
+        style={[styles.follow, following && styles.following]}
+        accessibilityLabel={following ? `Following ${u.displayName}` : `Follow ${u.displayName}`}
+        testID={`follow-${id}`}
+      >
+        {following ? <Check size={14} color={colors.ink} /> : null}
+        <T v="footnote" weight="700" color={following ? colors.ink : colors.white} style={{ marginLeft: following ? 4 : 0 }}>
+          {following ? 'Following' : 'Follow'}
+        </T>
+      </Tap>
+    </Tap>
+  );
+}
+
+function ChangeRow({ line, first }: { line: ChangeLine; first: boolean }) {
+  return (
+    <Tap onPress={() => pushOnce(hrefFor(line.ref))} scaleTo={0.99} style={[styles.change, !first && styles.divider]} accessibilityLabel={line.text} testID="change-row">
+      <View>
+        {line.round ? <Avatar uri={line.image} name={line.person ? repo.user(line.person)?.displayName : undefined} size={40} /> : <Img uri={line.image} style={styles.changeImg} />}
+        {line.fresh ? <View style={styles.freshDot} /> : null}
       </View>
-      <View style={styles.why}>
-        {item.why.map((w) => (
-          <T key={w} v="footnote" color={colors.ink2} weight="500" numberOfLines={2} style={{ marginTop: 2 }}>
-            {`· ${w}`}
-          </T>
-        ))}
-        {item.people && item.people.length > 1 ? (
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
-            <AvatarStack userIds={item.people} size={22} max={4} />
-          </View>
-        ) : null}
+      <View style={{ flex: 1, marginLeft: 12, minWidth: 0 }}>
+        <T v="subhead" weight={line.fresh ? '700' : '500'} numberOfLines={2}>
+          {line.text}
+        </T>
+        <T v="caption" color={colors.inkFaint} style={{ marginTop: 1 }}>
+          {timeAgo(line.at)}
+        </T>
       </View>
     </Tap>
   );
 }
 
 const styles = StyleSheet.create({
-  friends: { marginHorizontal: 16, marginTop: 16, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.xl, backgroundColor: 'rgba(255,255,255,0.7)', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
-  friendsHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, minHeight: 28 },
-  friend: { width: 72, alignItems: 'center', paddingTop: 4 },
-  freshDot: { position: 'absolute', right: 0, bottom: 1, width: 12, height: 12, borderRadius: 6, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.white },
-  listHead: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, marginTop: 24, marginBottom: 10 },
-  card: { padding: 14, borderRadius: radius.xl, backgroundColor: colors.surface },
-  liveCard: { marginHorizontal: 16, paddingHorizontal: 12, borderRadius: radius.xl, backgroundColor: colors.surface },
-  liveRow: { flexDirection: 'row', alignItems: 'center', minHeight: 64, paddingVertical: 10 },
-  liveDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
-  liveImg: { width: 44, height: 44, borderRadius: 12 },
-  thumb: { width: 58, height: 58, borderRadius: 16 },
-  iconThumb: { backgroundColor: colors.accentSoft, alignItems: 'center', justifyContent: 'center' },
-  why: { marginTop: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
+  stories: {
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    paddingBottom: 8,
+    gap: 2,
+    alignItems: 'flex-start',
+  },
+  sectionHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    marginTop: 24,
+    marginBottom: 10,
+    minHeight: 28,
+  },
+  sectionAction: {
+    minHeight: 44,
+    minWidth: 44,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+  hint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 16,
+    minHeight: 48,
+    paddingHorizontal: 14,
+    borderRadius: radius.lg,
+    backgroundColor: colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+  },
+  quiet: {
+    marginHorizontal: 16,
+    padding: 16,
+    borderRadius: radius.xl,
+    backgroundColor: colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+  },
+  pin: {
+    width: 150,
+    borderRadius: radius.lg,
+    backgroundColor: colors.surface,
+    overflow: 'hidden',
+  },
+  pinCover: { width: 150, height: 100 },
+  pinBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.94)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  now: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 76,
+    padding: 12,
+    borderRadius: radius.xl,
+    backgroundColor: colors.surface,
+  },
+  nowImg: { width: 52, height: 52, borderRadius: 14 },
+  person: {
+    width: 156,
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 10,
+    borderRadius: radius.xl,
+    backgroundColor: colors.surface,
+  },
+  follow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+    height: 36,
+    minWidth: 108,
+    paddingHorizontal: 14,
+    borderRadius: 18,
+    backgroundColor: colors.ink,
+  },
+  following: {
+    backgroundColor: colors.surfaceMuted,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  list: {
+    marginHorizontal: 16,
+    paddingHorizontal: 12,
+    borderRadius: radius.xl,
+    backgroundColor: colors.surface,
+  },
+  change: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 60,
+    paddingVertical: 10,
+  },
+  divider: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.line,
+  },
+  changeImg: { width: 40, height: 40, borderRadius: 12 },
+  freshDot: {
+    position: 'absolute',
+    right: -1,
+    top: -1,
+    width: 11,
+    height: 11,
+    borderRadius: 6,
+    backgroundColor: colors.accent,
+    borderWidth: 2,
+    borderColor: colors.white,
+  },
 });

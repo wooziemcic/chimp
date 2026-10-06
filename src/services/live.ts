@@ -31,9 +31,11 @@ import { fetchRelationships, subscribeUserEvents, type UserEventRow } from '@/se
 import * as realData from '@/services/backend/realData';
 import { repo } from '@/services/repository';
 import { useAfterDark } from '@/store/useAfterDark';
-import { isSocialKind, useSocialInbox } from '@/store/useSocialInbox';
+import { usePins } from '@/store/usePins';
+import { ACTIVITY_KINDS, isSocialKind, useSocialInbox } from '@/store/useSocialInbox';
 import { relationshipWrites, useChimp } from '@/store/useChimp';
 import { useSession } from '@/store/useSession';
+import { resetVideoPosters } from '@/services/videoPosters';
 
 export type LiveStatus = 'off' | 'connecting' | 'live' | 'reconnecting';
 
@@ -186,6 +188,8 @@ function subscribe(me: string) {
         useSocialInbox.getState().add({ ...row, seen_at: row.seen_at ?? null });
         void ensurePeople([row.actor_id]);
       }
+      // Phase 9: new posts / joins / replies around you → the content itself, soon (at most once a minute).
+      if (ACTIVITY_KINDS.has(row.kind)) refreshWorldSoon();
     },
     (status) => {
       if (uid !== me || gen !== generation) return;
@@ -240,8 +244,22 @@ export async function foreground(reason: string): Promise<void> {
   }
 }
 
+/** Phase 9: an activity event means new content somewhere you care about: reload the world, throttled. */
+let worldTimer: ReturnType<typeof setTimeout> | null = null;
+export const WORLD_REFRESH_MIN_MS = 60_000;
+function refreshWorldSoon() {
+  if (worldTimer) return;
+  worldTimer = setTimeout(() => {
+    worldTimer = null;
+    if (!uid || Date.now() - worldAt < WORLD_REFRESH_MIN_MS) return;
+    worldAt = Date.now();
+    void useSession.getState().refresh();
+  }, 1_500);
+}
+
 /** Build 5 patch 2: load the in-app social list and the people it names. */
 async function loadInbox(me: string): Promise<void> {
+  void usePins.getState().load(me, true); // Phase 9: pinned Worlds (foreground / reconnect re-read)
   await useSocialInbox.getState().load(me);
   if (uid !== me) return;
   await ensurePeople(useSocialInbox.getState().items.map((i) => i.actor_id));
@@ -277,6 +295,7 @@ export function startLive(me: string): void {
 }
 
 export function stopLive(): void {
+  resetVideoPosters(); // Phase 9: no poster work for a signed-out account
   uid = null;
   generation++;
   unsubscribe?.();
@@ -289,8 +308,11 @@ export function stopLive(): void {
   debounce = null;
   if (resubscribe) clearTimeout(resubscribe);
   resubscribe = null;
+  if (worldTimer) clearTimeout(worldTimer);
+  worldTimer = null;
   stopFallback();
   again = false;
   useLive.setState({ status: 'off', syncedAt: 0, vibeHint: false });
   useSocialInbox.getState().reset();
+  usePins.getState().reset();
 }

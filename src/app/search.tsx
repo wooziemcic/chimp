@@ -10,6 +10,7 @@ import { Img } from '@/components/ui/Img';
 import { EmptyState } from '@/components/ui/misc';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
+import { openWorldActions } from '@/components/worlds/WorldActionSheet';
 import { interestById } from '@/data/interests';
 import { type PersonHit, searchPeople } from '@/services/backend/people';
 import { repo } from '@/services/repository';
@@ -25,9 +26,19 @@ interface Row {
   image?: ImageSrc;
   round?: boolean;
   href: Href;
+  /** Phase 9: a World (long-press → Pin / Unpin). */
+  boardId?: string;
 }
 
 const SUGGESTIONS = ['Tokyo', 'co-founder', 'rooftop', 'photography', 'Lisbon', 'ramen'];
+
+/** "by @misu" · "Your World" · "Chimp World" — who a World belongs to. */
+function worldOwnerLine(ownerId?: string): string {
+  if (!ownerId) return 'Chimp World';
+  if (repo.isMe(ownerId)) return 'Your World';
+  const u = repo.user(ownerId);
+  return u?.username ? `by @${u.username}` : u ? `by ${u.displayName}` : 'A member’s World';
+}
 
 function matches(q: string, ...fields: (string | undefined)[]) {
   return fields.some((f) => f?.toLowerCase().includes(q));
@@ -49,11 +60,14 @@ export default function SearchScreen() {
     const people: Row[] = repo
       .people()
       .filter((u) => matches(query, u.displayName, u.username, u.city, u.bio, ...u.interests.map((i) => interestById[i]?.label), ...(u.knownFor ?? [])))
-      .map((u) => ({ key: u.id, title: u.displayName, subtitle: `${u.city} · ${(u.knownFor ?? [])[0] ?? ''}`, image: u.avatar, round: true, href: `/profile/${u.id}` }));
+      // Phase 9: names aren't unique — the @username identifies the person.
+      .map((u) => ({ key: u.id, title: u.displayName, subtitle: [u.username ? `@${u.username}` : null, u.city].filter(Boolean).join(' · '), image: u.avatar, round: true, href: `/profile/${u.id}` }));
     const boards: Row[] = repo
       .boards()
       .filter((b) => matches(query, b.title, b.tagline, b.city, ...b.interests.map((i) => interestById[i]?.label)))
-      .map((b) => ({ key: b.id, title: b.title, subtitle: `Board · ${compact(b.memberCount)} ${b.activityVerb}`, image: b.cover, href: `/board/${b.id}` }));
+      // Phase 9: World names aren't unique either ("NYC Rooftops" by two people):
+      // every result says whose it is, and opens by its id, never its name.
+      .map((b) => ({ key: b.id, title: b.title, subtitle: [worldOwnerLine(b.ownerId), b.visibility === 'private' ? 'Private' : b.visibility === 'connections' ? 'Connections' : null, b.memberCount ? `${compact(b.memberCount)} ${b.memberCount === 1 ? 'member' : 'members'}` : null].filter(Boolean).join(' · '), image: b.cover, href: `/board/${b.id}`, boardId: b.id }));
     const moves: Row[] = repo
       .moves()
       .filter((m) => matches(query, m.title, m.subtitle, m.city, m.description, ...m.interests.map((i) => interestById[i]?.label)))
@@ -66,7 +80,7 @@ export default function SearchScreen() {
     }
     return [
       { title: 'People', data: people },
-      { title: 'Boards', data: boards },
+      { title: 'Worlds', data: boards },
       { title: 'Moves', data: moves },
     ].filter((s) => s.data.length);
   }, [query, remote]);
@@ -86,7 +100,7 @@ export default function SearchScreen() {
             autoFocus
             value={q}
             onChangeText={setQ}
-            placeholder="Search people, places, or opportunities"
+            placeholder="Search people, @usernames or Worlds"
             placeholderTextColor={colors.inkFaint}
             returnKeyType="search"
             autoCorrect={false}
@@ -126,7 +140,15 @@ export default function SearchScreen() {
             </T>
           )}
           renderItem={({ item }) => (
-            <Tap onPress={() => go(item.href)} scaleTo={0.985} style={styles.row}>
+            <Tap
+              onPress={() => go(item.href)}
+              onLongPress={item.boardId ? () => openWorldActions(item.boardId!) : undefined}
+              delayLongPress={380}
+              accessibilityLabel={`${item.title}${item.subtitle ? `, ${item.subtitle}` : ''}`}
+              accessibilityHint={item.boardId ? 'Long-press to pin' : undefined}
+              scaleTo={0.985}
+              style={styles.row}
+            >
               {item.round ? <Avatar uri={item.image} name={item.title} size={48} /> : <Img uri={item.image} style={styles.thumb} />}
               <View style={{ flex: 1, marginLeft: 12 }}>
                 <T v="bodyStrong">{item.title}</T>

@@ -8,13 +8,13 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { BuzzCard } from '@/components/buzz/BuzzCard';
 import { DriftPager } from '@/components/drift/DriftPager';
 import { ComposeRow, CreateButton } from '@/components/create/CreateButton';
-import { GRID_GAP, PostTile } from '@/components/profile/RecentPosts';
+import { FollowingPerson } from '@/components/buzz/FollowingPerson';
 import { Button, EmptyState } from '@/components/ui/misc';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Segmented } from '@/components/ui/Segmented';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import { type BuzzTab, type FeedEntry, type ProfilePost, buildDriftFeed, buzzEngagement, buzzFeed, followingGridFor, isAfterDarkRef } from '@/graph/surfaces';
+import { type BuzzTab, type FeedEntry, type FollowingPerson as Person, buildDriftFeed, buzzEngagement, buzzFeed, followingPeopleFor, isAfterDarkRef } from '@/graph/surfaces';
 import { useGraphCtx, useUnseenChanges } from '@/hooks/useGraph';
 import { useTabBarSpace } from '@/hooks/useLayout';
 import { useDataset } from '@/services/dataset';
@@ -24,13 +24,15 @@ import type { BuzzItem } from '@/types/models';
 import { engagementScore } from '@/utils/feedOrder';
 
 type Tab = BuzzTab | 'drift';
-type Row = { key: string; item: BuzzItem } | { key: string; tiles: ProfilePost[] };
+type Row = { key: string; item: BuzzItem } | { key: string; person: Person };
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'forYou', label: 'For You' },
-  { id: 'following', label: 'Following' },
-  { id: 'trending', label: 'Trending' },
-  { id: 'drift', label: 'Drift' },
+// Widths follow the labels a little, so "Trending 🔥" never truncates on a 375-pt phone.
+const TABS: { id: Tab; label: string; flex: number }[] = [
+  { id: 'forYou', label: 'For You', flex: 1 },
+  { id: 'following', label: 'Following', flex: 1.12 },
+  // Phase 9: 🔥 means Trending (engagement + recency) and nothing else.
+  { id: 'trending', label: 'Trending 🔥', flex: 1.34 },
+  { id: 'drift', label: 'Drift', flex: 0.74 },
 ];
 
 /**
@@ -41,7 +43,8 @@ const TABS: { id: Tab; label: string }[] = [
  * Four sub-tabs, each with its own ordering AND look (graph/surfaces, rules
  * in utils/feedOrder):
  *   For You    full-width feed, newest first (created_at desc).
- *   Following  3-column grid of posts from people you follow, newest first.
+ *   Following  people-first: each person you follow who posted this week,
+ *              their posts as tiles (3, then View more), newest first.
  *   Trending   full-width feed, likes + comments with a small recency boost.
  *   Drift      immersive full-screen photos and videos, newest first.
  * Tapping Buzz in the tab bar while you're on it scrolls back to the top.
@@ -78,20 +81,11 @@ export default function BuzzScreen() {
   };
   // The whole list is ordered first, then shown row by row, so the order holds
   // all the way down (not just on the first screen). For You / Trending: one
-  // full-width card per row. Following: rows of three tiles.
-  const cols = 3;
-  const tile = Math.floor((width - 32 - GRID_GAP * (cols - 1)) / cols);
+  // full-width card per row. Following: one card per person.
+  const tile = Math.floor((width - 56 - 8) / 3);
   const rows = useMemo<Row[]>(() => {
     if (tab === 'drift') return [];
-    if (tab === 'following') {
-      const tiles = followingGridFor(ctx, orderAt);
-      const out: Row[] = [];
-      for (let i = 0; i < tiles.length; i += cols) {
-        const part = tiles.slice(i, i + cols);
-        out.push({ key: part.map((t) => t.key).join('+'), tiles: part });
-      }
-      return out;
-    }
+    if (tab === 'following') return followingPeopleFor(ctx, orderAt).map((p) => ({ key: `p:${p.personId}`, person: p }));
     return buzzFeed(ctx, tab, orderAt).map((b) => ({ key: b.id, item: b }));
   }, [ctx, tab, orderAt]);
 
@@ -173,7 +167,7 @@ export default function BuzzScreen() {
         keyExtractor={(r) => r.key}
         initialNumToRender={tab === 'following' ? 8 : 6}
         windowSize={7}
-        contentContainerStyle={{ paddingBottom: bottom, gap: tab === 'following' ? GRID_GAP : 10 }}
+        contentContainerStyle={{ paddingBottom: bottom, gap: tab === 'following' ? 12 : 10 }}
         refreshing={real ? syncing && !loading : false}
         onRefresh={
           real
@@ -200,12 +194,8 @@ export default function BuzzScreen() {
           </View>
         }
         renderItem={({ item: row }) =>
-          'tiles' in row ? (
-            <View style={styles.gridRow} testID="following-row">
-              {row.tiles.map((t) => (
-                <PostTile key={t.key} post={t} size={tile} showAuthor testPrefix="following-tile" />
-              ))}
-            </View>
+          'person' in row ? (
+            <FollowingPerson person={row.person} tile={tile} />
           ) : (
             <View style={styles.row}>
               <BuzzCard item={row.item} width={full} />
@@ -216,10 +206,15 @@ export default function BuzzScreen() {
           loading ? (
             <BuzzSkeleton width={full} />
           ) : (
-            <EmptyState
-              title={tab === 'following' ? 'Nothing from your people yet' : real ? 'Buzz is quiet' : 'Quiet for now'}
-              body={tab === 'following' ? 'Follow people and their posts show up here.' : real ? 'Be the first: say something. A World is optional.' : 'Check back soon.'}
-            />
+            tab === 'following' ? (
+              <EmptyState
+                title="It’s quiet here."
+                body="People you follow haven’t posted this week."
+                action={<Button label="Find people" onPress={() => router.navigate('/happening?section=people')} />}
+              />
+            ) : (
+              <EmptyState title={real ? 'Buzz is quiet' : 'Quiet for now'} body={real ? 'Be the first: say something. A World is optional.' : 'Check back soon.'} />
+            )
           )
         }
       />
@@ -247,6 +242,5 @@ const styles = StyleSheet.create({
   skel: { borderRadius: radius.xl, backgroundColor: colors.surface, padding: 16, opacity: 0.8 },
   skelLine: { height: 12, borderRadius: 6, width: '85%', backgroundColor: colors.surfaceMuted },
   row: { flexDirection: 'row', gap: 10, paddingHorizontal: 16, alignItems: 'flex-start' },
-  gridRow: { flexDirection: 'row', gap: GRID_GAP, paddingHorizontal: 16 },
   updates: { flexDirection: 'row', alignItems: 'center', marginHorizontal: 16, marginTop: 12, minHeight: 44, paddingHorizontal: 12, borderRadius: radius.lg, backgroundColor: colors.accentSoft },
 });

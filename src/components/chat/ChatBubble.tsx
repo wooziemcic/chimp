@@ -1,4 +1,5 @@
 import { Check, CheckCheck, CornerUpLeft } from 'lucide-react-native';
+import { router } from 'expo-router';
 import { memo } from 'react';
 import { StyleSheet, View } from 'react-native';
 
@@ -9,9 +10,12 @@ import { T } from '@/components/ui/Text';
 import type { ChatMsg } from '@/store/useChat';
 import { openMedia } from '@/store/useMediaViewer';
 import { colors } from '@/theme';
+import { useNow } from '@/hooks/useNow';
+import { useDataset } from '@/services/dataset';
 import type { ImageSrc } from '@/types/models';
 import { clockLabel } from '@/utils/format';
 import { type Receipt, receiptLabel } from '@/utils/receipts';
+import { storyContext } from '@/utils/storyContext';
 import type { ReactionChip } from '@/utils/messaging';
 
 interface Props {
@@ -40,6 +44,7 @@ interface Props {
  */
 export const ChatBubble = memo(function ChatBubble({ m, mine, sender, quote, reactions, onLongPress, onRetry, onToggleReaction, receipt, onReceiptPress }: Props) {
   const failed = m.status === 'failed';
+
   const pending = !!m.status;
   const group = !!sender;
   return (
@@ -64,6 +69,7 @@ export const ChatBubble = memo(function ChatBubble({ m, mine, sender, quote, rea
           accessibilityHint="Long-press for Reply, React, Open Loop, Copy"
           testID={`msg-${m.body ?? m.id}`}
         >
+          {m.storyKind ? <StoryContextRow m={m} mine={mine} /> : null}
           {quote ? (
             <View style={[styles.quote, mine ? { alignSelf: 'flex-end' } : null]}>
               <CornerUpLeft size={12} color={colors.inkFaint} />
@@ -73,7 +79,9 @@ export const ChatBubble = memo(function ChatBubble({ m, mine, sender, quote, rea
             </View>
           ) : null}
           {m.image ? <Img uri={m.image} style={{ width: 220, height: Math.round(220 / Math.min(1.6, Math.max(0.7, m.aspect ?? 1))), borderRadius: 18, opacity: m.status === 'sending' ? 0.6 : 1 }} /> : null}
-          {m.body ? (
+          {m.body && m.storyKind === 'reaction' ? (
+            <T style={styles.reaction}>{m.body}</T>
+          ) : m.body ? (
             <View style={[styles.bubble, mine ? styles.mine : styles.theirs, failed && styles.failed, m.image && { marginTop: 4 }]}>
               <T v="subhead" weight="400" color={mine && !failed ? colors.white : colors.ink}>
                 {m.body}
@@ -126,6 +134,35 @@ export const ChatBubble = memo(function ChatBubble({ m, mine, sender, quote, rea
   );
 });
 
+/** Phase 9: which Story a reply / reaction is about (while it lives), or "Story expired". */
+function StoryContextRow({ m, mine }: { m: ChatMsg; mine: boolean }) {
+  const stories = useDataset().stories;
+  const now = useNow();
+  const story = storyContext(m, mine, stories, now);
+  if (!story) return null;
+  return (
+    <Tap
+      onPress={story.storyId ? () => router.push(`/story/${story.storyId}`) : undefined}
+      disabled={!story.storyId}
+      style={[styles.story, mine ? { alignSelf: 'flex-end' } : null]}
+      accessibilityLabel={`${story.label}${story.gone ? `. ${story.gone}` : ''}`}
+      testID="story-context"
+    >
+      {story.image ? <Img uri={story.image} style={styles.storyThumb} /> : <View style={[styles.storyThumb, styles.storyGone]} />}
+      <View style={{ marginLeft: 8, flexShrink: 1 }}>
+        <T v="caption" weight="700" color={colors.inkMuted} numberOfLines={1}>
+          {story.label}
+        </T>
+        {story.gone ? (
+          <T v="caption" color={colors.inkFaint} numberOfLines={1} testID="story-gone">
+            {story.gone}
+          </T>
+        ) : null}
+      </View>
+    </Tap>
+  );
+}
+
 /**
  * The status line under my newest message: time · ✓ Sent / ✓✓ Delivered / ✓✓ Seen.
  * Never colour alone: one check vs two, the word, and Seen is bold on a soft
@@ -166,6 +203,10 @@ const styles = StyleSheet.create({
   chip: { flexDirection: 'row', alignItems: 'center', height: 26, paddingHorizontal: 8, borderRadius: 13, backgroundColor: colors.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
   chipMine: { backgroundColor: colors.accentSoft, borderColor: colors.accentGlow },
   chipBrain: { backgroundColor: colors.violetSoft, borderColor: '#D9C9FF' },
+  story: { flexDirection: 'row', alignItems: 'center', maxWidth: 240, marginBottom: 4, padding: 4, paddingRight: 10, borderRadius: 12, backgroundColor: colors.surfaceMuted },
+  storyThumb: { width: 30, height: 46, borderRadius: 6 },
+  storyGone: { backgroundColor: colors.line },
+  reaction: { fontSize: 44, lineHeight: 52 },
   receipt: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', minHeight: 18 },
   receiptTag: { flexDirection: 'row', alignItems: 'center' },
   receiptPill: { backgroundColor: '#FCEFC7', borderRadius: 9, paddingHorizontal: 6, paddingVertical: 1 },

@@ -4,7 +4,7 @@
  * to every phone you're signed in on. After Dark notifications are always
  * generic ("New After Dark message") — never a name, a Crush or content.
  */
-import { Bell, BellOff, Heart, MessageCircle, Users } from 'lucide-react-native';
+import { Bell, BellOff, Heart, MessageCircle, Sparkles, Users } from 'lucide-react-native';
 import { type ReactNode, useCallback, useEffect, useState } from 'react';
 import { AppState, StyleSheet, Switch, View } from 'react-native';
 
@@ -16,6 +16,7 @@ import { colors, radius } from '@/theme';
 const ROWS: { key: keyof NotificationPrefs; label: string; body: string; icon: ReactNode }[] = [
   { key: 'messages', label: 'Messages', body: 'Who wrote to you. Never what they wrote.', icon: <MessageCircle size={18} color={colors.accent} /> },
   { key: 'connections', label: 'Connections', body: 'New followers, requests and accepted connections.', icon: <Users size={18} color={colors.accent} /> },
+  { key: 'activity', label: 'Activity', body: 'Likes and replies on your posts, and new posts in Worlds you follow.', icon: <Sparkles size={18} color={colors.accent} /> },
   { key: 'after_dark', label: 'After Dark', body: 'Always discreet: “New After Dark message”, never a name.', icon: <Heart size={18} color={colors.accent} /> },
 ];
 

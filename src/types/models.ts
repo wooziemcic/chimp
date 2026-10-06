@@ -344,6 +344,8 @@ export interface StoryItem {
   caption: string;
   location?: string;
   createdAt: ISODate;
+  /** Phase 9: exact server time (ms) — REAL items; `createdAt` is a display label there ("2h"). */
+  createdAtMs?: number;
   durationMs: number;
   boardId?: ID;
   moveId?: ID;
@@ -703,6 +705,8 @@ export interface BuzzVideo {
   durationMs?: number;
   /** width / height, when known. */
   aspect?: number;
+  /** Phase 9: the `media` row (REAL) — lets the owner's phone add a missing poster later. */
+  mediaId?: string;
 }
 
 /** Seeded news card. Always a demo fixture in the prototype, never live data. */

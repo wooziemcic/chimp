@@ -10,6 +10,8 @@ export type PushData = Record<string, unknown> | null | undefined;
 const AD_TABS = new Set(['discover', 'vibes', 'challenges', 'plans', 'inbox']);
 
 const id = (v: unknown): string | null => (typeof v === 'string' && UUID.test(v) ? v : null);
+/** World ids: catalog slugs or uuids (the same rule the server uses). */
+const BOARD_ID = /^[A-Za-z0-9_-]{1,80}$/;
 
 export interface PushTarget {
   href: string;
@@ -28,6 +30,16 @@ export function routeForPush(data: PushData): PushTarget | null {
     case 'group_message': {
       const c = id(data.conversation_id);
       return { href: c ? `/group/${c}` : '/messages', afterDark: false };
+    }
+    // Phase 9: likes / replies → the post; World activity / joins → the World.
+    case 'post': {
+      const post = id(data.id);
+      if (!post) return null;
+      return { href: data.post_kind === 'drift' ? `/drift/${post}` : `/buzz/${post}`, afterDark: false };
+    }
+    case 'world': {
+      const b = typeof data.board_id === 'string' && BOARD_ID.test(data.board_id) ? data.board_id : null;
+      return b ? { href: `/board/${b}`, afterDark: false } : { href: '/happening', afterDark: false };
     }
     case 'connection': {
       const who = id(data.user_id);

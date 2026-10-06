@@ -1,4 +1,4 @@
-import { useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { Pencil, Send, Sparkles, X } from 'lucide-react-native';
 import { useEffect, useMemo, useState } from 'react';
 import { FlatList, KeyboardAvoidingView, Platform, StyleSheet, TextInput, useWindowDimensions, View } from 'react-native';
@@ -6,7 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BuzzCard, useReplyCount } from '@/components/buzz/BuzzCard';
 import { Avatar } from '@/components/ui/Avatar';
-import { EmptyState } from '@/components/ui/misc';
+import { Button, EmptyState } from '@/components/ui/misc';
 import { OwnerMenu } from '@/components/ui/OwnerMenu';
 import { ScreenHeader } from '@/components/ui/ScreenHeader';
 import { Tap } from '@/components/ui/Tap';
@@ -51,7 +51,7 @@ export default function BuzzThread() {
   const why = useMemo(() => (item ? scoreBuzz(ctx, item).reasons.filter((r) => r.kind !== 'editorial').slice(0, 3) : []), [ctx, item]);
   const replies = useMemo(() => [...data.buzzReplies.filter((r) => r.buzzId === id), ...mine], [data.buzzReplies, id, mine]);
 
-  if (!item) return <EmptyState title="Not found" />;
+  if (!item) return <EmptyState title="This post isn’t available" body="It may have been deleted, or you no longer have access." action={<Button label="Go back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/buzz'))} />} />;
   const board = repo.board(item.boardId);
 
   const send = () => {

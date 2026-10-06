@@ -9,7 +9,7 @@ import { duration } from '@/components/drift/DriftTile';
 import { ChimpVideo } from '@/components/media/ChimpVideo';
 import { Avatar } from '@/components/ui/Avatar';
 import { Img } from '@/components/ui/Img';
-import { EmptyState } from '@/components/ui/misc';
+import { Button, EmptyState } from '@/components/ui/misc';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { driftQueue, isAfterDarkBoard } from '@/graph/surfaces';
@@ -69,7 +69,7 @@ export default function DriftViewer() {
 
   const getItemLayout = useCallback((_: unknown, index: number) => ({ length: height, offset: height * index, index }), [height]);
 
-  if (!queue.length) return <EmptyState title="Not found" />;
+  if (!queue.length) return <EmptyState title="This post isn’t available" body="It may have been deleted, or you no longer have access." action={<Button label="Go back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/buzz'))} />} />;
 
   return (
     <View style={{ flex: 1, backgroundColor: '#000' }}>

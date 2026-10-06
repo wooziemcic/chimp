@@ -10,6 +10,7 @@
  */
 import { inferInterestsFromText } from '@/utils/inferInterests';
 import { repo } from '@/services/repository';
+import { usePins } from '@/store/usePins';
 import { useChimp } from '@/store/useChimp';
 import { useSession } from '@/store/useSession';
 import { deleteBuzz, deleteComment, deleteWorld, editBuzz, editComment } from './content';
@@ -89,6 +90,7 @@ export async function deleteMyWorld(boardId: string, mode: 'real' | 'demo'): Pro
   if (mode === 'real') {
     await deleteWorld(boardId);
     realData.removeBoard(boardId);
+    usePins.getState().forget(boardId);
   } else {
     const created = useChimp.getState().created;
     if (created) useChimp.setState({ created: { ...created, boards: created.boards.filter((b) => b.id !== boardId) } });

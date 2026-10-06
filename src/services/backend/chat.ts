@@ -48,6 +48,9 @@ export interface MessageRow {
   viewed_at?: string | null;
   /** 0007: voice note length. */
   duration_ms?: number | null;
+  /** 0012: a reply / reaction to a Story (the DM outlives the Story). */
+  story_item_id?: string | null;
+  story_kind?: 'reply' | 'reaction' | null;
 }
 
 /** 0007: how a message is sent (default: text, or a photo when media is given). */
@@ -478,4 +481,49 @@ export function subscribeInbox(uid: string, handlers: { onMessage: (m: MessageRo
   return () => {
     void sb().removeChannel(channel);
   };
+}
+
+
+// ─── Phase 9: Story replies and reactions → the normal DM (0012) ───────────
+
+export const STORY_REACTIONS = ['❤️', '😂', '🔥', '😮', '😢', '👏'] as const;
+export type StoryReaction = (typeof STORY_REACTIONS)[number];
+
+export class StoryReplyError extends Error {
+  constructor(
+    message: string,
+    readonly kind: 'unavailable' | 'not_allowed' | 'offline' | 'failed',
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Reply to (or react to) someone's Story. It lands in your normal 1:1 DM with
+ * them (Messages, push, receipts), linked to the Story while it lives. The
+ * server checks the Story is live and visible to you, blocks, and whether you
+ * may message them. Retrying with the same client id never sends twice.
+ * Without 0012 (older server) the text still goes to the DM, without the link.
+ */
+export async function sendStoryReply(p: { storyItemId: string; ownerId: string; kind: 'reply' | 'reaction'; body: string; clientId: string; ownerName?: string }): Promise<{ conversationId: string; messageId: string }> {
+  const res = await sb().rpc('send_story_reply', { p_story_item_id: p.storyItemId, p_kind: p.kind, p_body: p.body, p_client_id: p.clientId });
+  if (!res.error) {
+    const d = res.data as { message_id: string; conversation_id: string };
+    return { conversationId: d.conversation_id, messageId: d.message_id };
+  }
+  const e = res.error;
+  if (e.code === 'PGRST202') {
+    // Older server: a plain DM that says what it's about.
+    const cid = await startConversation(p.ownerId).catch(() => {
+      throw new StoryReplyError(`You can’t message ${p.ownerName ?? 'them'} yet.`, 'not_allowed');
+    });
+    const text = p.kind === 'reaction' ? `Reacted ${p.body} to your story` : `Replied to your story: ${p.body}`;
+    const ins = await sb().from('messages').insert({ conversation_id: cid, sender_id: (await sb().auth.getUser()).data.user?.id, body: text, client_id: p.clientId }).select('id').single();
+    if (ins.error && ins.error.code !== '23505') throw new StoryReplyError('Couldn’t send. Try again.', 'failed');
+    return { conversationId: cid, messageId: (ins.data as { id: string } | null)?.id ?? '' };
+  }
+  if (e.message === 'story_unavailable') throw new StoryReplyError('This Story isn’t available any more.', 'unavailable');
+  if (/not_allowed/.test(e.message) || e.code === '42501') throw new StoryReplyError(`You can’t message ${p.ownerName ?? 'them'} yet.`, 'not_allowed');
+  if (/fetch|network/i.test(e.message)) throw new StoryReplyError('You seem to be offline. Try again.', 'offline');
+  throw new StoryReplyError('Couldn’t send. Try again.', 'failed');
 }

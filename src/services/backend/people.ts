@@ -105,6 +105,9 @@ export interface UserEventRow {
   kind: string;
   actor_id: string | null;
   ref_id: string | null;
+  /** Phase 9 (0012): what an activity event is about. */
+  ref_kind?: string | null;
+  board_id?: string | null;
   created_at: string;
   seen_at?: string | null;
 }
@@ -114,14 +117,12 @@ export type SocialEventRow = UserEventRow & { seen_at: string | null };
 
 /** Your recent social events, newest first (RLS: only your own rows are readable). */
 export async function fetchSocialEvents(kinds: string[], limit = 50): Promise<SocialEventRow[]> {
-  const { data, error } = await sb()
-    .from('user_events')
-    .select('id,user_id,kind,actor_id,ref_id,created_at,seen_at')
-    .in('kind', kinds)
-    .order('created_at', { ascending: false })
-    .limit(limit);
-  if (error) throw new Error('events unavailable');
-  return (data ?? []) as SocialEventRow[];
+  const q = (cols: string) => sb().from('user_events').select(cols).in('kind', kinds).order('created_at', { ascending: false }).limit(limit);
+  let res = await q('id,user_id,kind,actor_id,ref_id,ref_kind,board_id,created_at,seen_at');
+  // A project without 0012 has no ref_kind / board_id columns yet: read what it has.
+  if (res.error && /ref_kind|board_id|column/i.test(res.error.message)) res = await q('id,user_id,kind,actor_id,ref_id,created_at,seen_at');
+  if (res.error) throw new Error('events unavailable');
+  return (res.data ?? []) as unknown as SocialEventRow[];
 }
 
 /** Mark your events seen (0008 mark_events_seen; your own rows only). */
@@ -143,4 +144,15 @@ export function subscribeUserEvents(uid: string, onEvent: (e: UserEventRow) => v
   return () => {
     void sb().removeChannel(channel);
   };
+}
+
+/**
+ * Phase 9: "People you may want to know" — server counts only (0012
+ * suggest_people: mutual connections, shared Worlds; privacy-filtered).
+ * null = not available on this server (the app falls back to what it knows).
+ */
+export async function fetchPeopleSuggestions(limit = 12): Promise<{ user_id: string; mutual_connections: number; shared_worlds: number }[] | null> {
+  const res = await sb().rpc('suggest_people', { p_limit: limit });
+  if (res.error) return null;
+  return (res.data ?? []) as { user_id: string; mutual_connections: number; shared_worlds: number }[];
 }

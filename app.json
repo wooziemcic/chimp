@@ -61,7 +61,8 @@
       [
         "expo-notifications",
         {
-          "color": "#1D6BFF"
+          "color": "#1D6BFF",
+          "enableBackgroundRemoteNotifications": true
         }
       ],
       [
@@ -83,7 +84,8 @@
             "video"
           ]
         }
-      ]
+      ],
+      "expo-asset"
     ],
     "extra": {
       "router": {},

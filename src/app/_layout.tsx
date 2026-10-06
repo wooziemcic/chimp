@@ -30,6 +30,7 @@ import { ensurePushRegistered, installPushHandling, onPendingPush, pendingPush, 
 import { pushGate } from '@/services/pushRoutes';
 import { OfflineBanner } from '@/components/OfflineBanner';
 import { UnfinishedPostCard } from '@/components/create/UnfinishedPostCard';
+import { WorldActionSheet } from '@/components/worlds/WorldActionSheet';
 import { useSession } from '@/store/useSession';
 import { colors } from '@/theme';
 import { afterFirstPaint, startupMark } from '@/utils/startup';
@@ -264,6 +265,7 @@ export default function RootLayout() {
         {appReady && mode === 'real' ? <OfflineBanner /> : null}
         {/* Posting reliability: "You have an unfinished post" (this account's drafts only). */}
         {appReady ? <UnfinishedPostCard /> : null}
+        {appReady ? <WorldActionSheet /> : null}
         </AppReviewFrame>
         </DeviceInsetsProvider>
       </ThemeProvider>

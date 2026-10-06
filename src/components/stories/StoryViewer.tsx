@@ -1,8 +1,8 @@
 import { Href, router } from 'expo-router';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { ArrowRight, Flame, Heart, MapPin, Send, X } from 'lucide-react-native';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ArrowRight, MapPin, Send, X } from 'lucide-react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, StyleSheet, TextInput, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
@@ -21,7 +21,11 @@ import { scheduleOnRN } from 'react-native-worklets';
 import { Avatar } from '@/components/ui/Avatar';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
+import { STORY_REACTIONS, StoryReplyError, sendStoryReply } from '@/services/backend/chat';
 import { repo } from '@/services/repository';
+import { useChat } from '@/store/useChat';
+import { uuid } from '@/utils/id';
+import { storyFrameId } from '@/utils/storyContext';
 import { useChimp } from '@/store/useChimp';
 import { colors } from '@/theme';
 import type { Story, StoryItem } from '@/types/models';
@@ -53,6 +57,9 @@ export function StoryViewer({ queue, startIndex }: Props) {
   const [restartTick, setRestartTick] = useState(0);
   const [reply, setReply] = useState('');
   const [toast, setToast] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  // A double tap must never send twice (state updates are async; a ref isn't).
+  const inFlight = useRef(false);
 
   const story = queue[storyIdx];
   const item: StoryItem | undefined = story?.items[itemIdx];
@@ -63,8 +70,6 @@ export function StoryViewer({ queue, startIndex }: Props) {
   const move = item?.moveId ? repo.move(item.moveId) : story?.owner.kind === 'move' ? repo.move(story.owner.id) : undefined;
 
   const markSeen = useChimp((s) => s.markStoryItemSeen);
-  const liked = useChimp((s) => (item ? !!s.likedPosts[item.id] : false));
-  const toggleLike = useChimp((s) => s.toggleLike);
   const sendMessage = useChimp((s) => s.sendMessage);
 
   // Progress state lives on the UI thread so the bars stay smooth.
@@ -218,12 +223,42 @@ export function StoryViewer({ queue, startIndex }: Props) {
         ? { label: `View ${author.displayName.split(' ')[0]}’s profile`, go: () => leaveTo(`/profile/${author.id}`) }
         : null;
 
-  const sendReply = () => {
-    if (!reply.trim() || !author) return;
-    sendMessage(author.id, reply);
-    setReply('');
-    setToast(`Sent to ${author.displayName.split(' ')[0]}`);
-    setTimeout(() => setToast(null), 1600);
+  // Phase 9: replies and reactions go to the author's normal DM (REAL), linked to
+  // this Story while it lives. Never on your own Story. The Demo keeps its local chat.
+  const own = !!author && repo.isMe(author.id);
+  const real = repo.mode() === 'real';
+  const flash = (text: string, ms = 1600) => {
+    setToast(text);
+    setTimeout(() => setToast(null), ms);
+  };
+  const deliver = async (kind: 'reply' | 'reaction', body: string) => {
+    if (!author || !item || own || sending || inFlight.current) return false;
+    const first = author.displayName.split(' ')[0];
+    if (!real) {
+      sendMessage(author.id, kind === 'reaction' ? `${body} reacted to your story` : body);
+      flash(kind === 'reaction' ? 'Reaction sent' : `Sent to ${first}`);
+      return true;
+    }
+    inFlight.current = true;
+    setSending(true);
+    try {
+      // A World's copy of a Story frame has the id "<frame id>_w": the server knows the frame by its own id.
+      await sendStoryReply({ storyItemId: storyFrameId(item.id), ownerId: author.id, kind, body, clientId: `story-${uuid()}`, ownerName: first });
+      void useChat.getState().loadConversations();
+      flash(kind === 'reaction' ? `${body} sent to ${first}` : `Sent to ${first}`);
+      return true;
+    } catch (e) {
+      flash(e instanceof StoryReplyError ? e.message : 'Couldn’t send. Try again.', 2200);
+      return false;
+    } finally {
+      inFlight.current = false;
+      setSending(false);
+    }
+  };
+  const sendReply = async () => {
+    const text = reply.trim();
+    if (!text) return;
+    if (await deliver('reply', text)) setReply('');
   };
 
   return (
@@ -296,42 +331,38 @@ export function StoryViewer({ queue, startIndex }: Props) {
                   <ArrowRight size={16} color={colors.ink} strokeWidth={2.6} style={{ marginLeft: 8 }} />
                 </Tap>
               ) : null}
-              <View style={styles.replyRow}>
-                <View style={styles.replyInput}>
-                  <TextInput
-                    value={reply}
-                    onChangeText={setReply}
-                    onFocus={() => setPause('input', true)}
-                    onBlur={() => setPause('input', false)}
-                    onSubmitEditing={sendReply}
-                    placeholder={`Reply to ${author?.displayName.split(' ')[0] ?? 'story'}…`}
-                    placeholderTextColor="rgba(255,255,255,0.7)"
-                    returnKeyType="send"
-                    style={styles.replyText}
-                  />
-                  {reply.trim() ? (
-                    <Tap onPress={sendReply} accessibilityLabel="Send reply" style={styles.send}>
-                      <Send size={18} color={colors.white} />
-                    </Tap>
-                  ) : null}
-                </View>
-                <Tap onPress={() => toggleLike(item.id)} haptic="medium" accessibilityLabel={liked ? 'Unlike story' : 'Like story'} style={styles.react}>
-                  <Heart size={26} color={liked ? colors.heart : colors.white} fill={liked ? colors.heart : 'transparent'} />
-                </Tap>
-                <Tap
-                  onPress={() => {
-                    if (!author) return;
-                    sendMessage(author.id, '🔥');
-                    setToast('Reaction sent');
-                    setTimeout(() => setToast(null), 1400);
-                  }}
-                  haptic="light"
-                  accessibilityLabel="Send fire reaction"
-                  style={styles.react}
-                >
-                  <Flame size={26} color={colors.white} />
-                </Tap>
-              </View>
+              {!own && author ? (
+                <>
+                  <View style={styles.reactRow} testID="story-reactions">
+                    {STORY_REACTIONS.map((r) => (
+                      <Tap key={r} onPress={() => void deliver('reaction', r)} disabled={sending} haptic="light" accessibilityLabel={`React ${r}`} style={styles.reactChip} testID={`story-react-${r}`}>
+                        <T style={{ fontSize: 24 }}>{r}</T>
+                      </Tap>
+                    ))}
+                  </View>
+                  <View style={styles.replyRow}>
+                    <View style={styles.replyInput}>
+                      <TextInput
+                        value={reply}
+                        onChangeText={setReply}
+                        onFocus={() => setPause('input', true)}
+                        onBlur={() => setPause('input', false)}
+                        onSubmitEditing={() => void sendReply()}
+                        placeholder={`Reply to ${author.displayName.split(' ')[0]}…`}
+                        placeholderTextColor="rgba(255,255,255,0.7)"
+                        returnKeyType="send"
+                        style={styles.replyText}
+                        testID="story-reply-input"
+                      />
+                      {reply.trim() ? (
+                        <Tap onPress={() => void sendReply()} disabled={sending} accessibilityLabel="Send reply" style={styles.send} testID="story-reply-send">
+                          <Send size={18} color={colors.white} />
+                        </Tap>
+                      ) : null}
+                    </View>
+                  </View>
+                </>
+              ) : null}
             </Animated.View>
           </KeyboardAvoidingView>
         ) : null}
@@ -393,7 +424,9 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     backgroundColor: colors.white,
   },
-  replyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 12 },
+  replyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
+  reactRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 14 },
+  reactChip: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.14)' },
   replyInput: {
     flex: 1,
     height: 48,
@@ -407,7 +440,6 @@ const styles = StyleSheet.create({
   },
   replyText: { flex: 1, color: colors.white, fontSize: 16, height: 48 },
   send: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.accent },
-  react: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center', marginLeft: 2 },
   shadow: { textShadowColor: 'rgba(0,0,0,0.45)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 8 },
   toast: {
     position: 'absolute',

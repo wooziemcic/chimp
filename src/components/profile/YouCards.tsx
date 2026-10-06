@@ -6,6 +6,7 @@ import { StyleSheet, View } from 'react-native';
 
 import { Img } from '@/components/ui/Img';
 import { Tap } from '@/components/ui/Tap';
+import { openWorldActions } from '@/components/worlds/WorldActionSheet';
 import { T } from '@/components/ui/Text';
 import { colors, radius, shadow } from '@/theme';
 import type { Board, OpenLoop } from '@/types/models';
@@ -41,7 +42,7 @@ export const BoardStackCard = memo(function BoardStackCard({
       </Tap>
       {lead ? (
         <View style={{ flexDirection: 'row', height: 124 }}>
-          <Tap onPress={() => router.push(`/board/${lead.id}`)} scaleTo={0.97} style={[styles.lead, shadow.sm]}>
+          <Tap onPress={() => router.push(`/board/${lead.id}`)} onLongPress={() => openWorldActions(lead.id)} delayLongPress={380} scaleTo={0.97} style={[styles.lead, shadow.sm]}>
             <Img uri={lead.cover} style={[StyleSheet.absoluteFill, { borderRadius: 14 }]} />
             <LinearGradient colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.65)']} locations={[0.35, 1]} style={[StyleSheet.absoluteFill, { borderRadius: 14 }]} />
             <View style={styles.bookmark}>
