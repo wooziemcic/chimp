@@ -275,10 +275,46 @@ export function visibleBuzz(ctx: GraphContext): BuzzItem[] {
  */
 export function buzzFeed(ctx: GraphContext, tab: BuzzTab, now = Date.now()): BuzzItem[] {
   if (tab === 'forYou') {
-    const byId = new Map(visibleBuzz(ctx).map((b) => [b.id, b]));
+    const byId = new Map(forYouBuzz(ctx).map((b) => [b.id, b]));
     return newestFirst([...byId.values()].map((b) => timed(b, now))).map((t) => byId.get(t.id)!);
   }
   return rankBuzz(ctx, tab).map((x) => x.item);
+}
+
+/**
+ * For You is Chimp's DISCOVERY feed (Phase 9 polish). Eligibility is about
+ * visibility only — never about a relationship:
+ *   - any Buzz you may see, from anyone (Just Buzz, or in a World you may see)
+ *   - PUBLIC World → yes; CONNECTIONS World → only if you're already allowed in
+ *     (canViewBoard); PRIVATE World → only if you're a member; never After Dark;
+ *     never anyone you blocked (either side's block hides the rows server-side).
+ * Following / connection may only ever change the ORDER of a ranking, never
+ * whether a post can appear here.
+ */
+function forYouBuzz(ctx: GraphContext): BuzzItem[] {
+  return visibleBuzz(ctx).filter((b) => b.kind === 'news' || !b.boardId || canViewBoard(ctx, b.boardId));
+}
+
+/** World posts (Drift items: photos / clips posted into a World) that For You may show. Same visibility rule. */
+function forYouWorldPosts(ctx: GraphContext): DriftItem[] {
+  return repo
+    .drift()
+    .filter((d) => !!d.boardId && canViewBoard(ctx, d.boardId) && (!d.authorId || !ctx.s.blocked[d.authorId]) && !!d.image);
+}
+
+export type ForYouEntry = { kind: 'buzz'; item: BuzzItem; createdMs: number } | { kind: 'world'; item: DriftItem; createdMs: number };
+
+/**
+ * Buzz → For You rows, newest first: Buzz from anyone you may see, plus (REAL
+ * accounts) public World posts with their World shown on the card. The Demo
+ * keeps its curated Buzz-only For You.
+ */
+export function forYouFeed(ctx: GraphContext, now = Date.now()): ForYouEntry[] {
+  const buzz: ForYouEntry[] = forYouBuzz(ctx).map((b) => ({ kind: 'buzz', item: b, createdMs: createdMs(b, now) }));
+  const worlds: ForYouEntry[] = ds().mode === 'real' ? forYouWorldPosts(ctx).map((d) => ({ kind: 'world', item: d, createdMs: createdMs(d, now) })) : [];
+  const all = [...buzz, ...worlds];
+  const byKey = new Map(all.map((e) => [`${e.kind}:${e.item.id}`, e]));
+  return newestFirst(all.map((e) => ({ id: `${e.kind}:${e.item.id}`, createdMs: e.createdMs }))).map((t) => byKey.get(t.id)!);
 }
 
 /** `signals: false` = the plain graph score (Buzz → Drift interleaves it with Drift's own scores). */
@@ -564,7 +600,7 @@ export const FOLLOWING_PREVIEW = 3;
 
 export interface FollowingPerson {
   personId: string;
-  /** That person's Buzz posts from the last 7 days, newest first (all of them; the UI shows 3 first). */
+  /** That person's eligible posts (Buzz + World posts) from the last 7 days, newest first (all of them; the UI shows 3 first). */
   posts: ProfilePost[];
   /** Their newest qualifying post (ms): people are ordered by it. */
   latest: number;
@@ -572,17 +608,19 @@ export interface FollowingPerson {
 
 /**
  * Buzz → Following (Phase 9, people-first): one section per person you follow
- * (or are connected with) who posted Buzz in the last 7 days. People ordered
- * by their newest post; inside, that person's posts newest first. Same
- * visibility rules as everywhere (blocks, World access, never After Dark).
- * Nobody without a post this week gets an empty section.
+ * (or are connected with) who posted in the last 7 days. People ordered by
+ * their newest post; inside, that person's posts newest first. Posts = their
+ * Buzz (Just Buzz or in a World) AND their World photos / clips — the same
+ * canonical items as their profile (one tile per item, never a copy). Same
+ * visibility rules as everywhere: PUBLIC Worlds, CONNECTIONS / PRIVATE Worlds
+ * only where you already have access (canViewBoard), nobody you blocked,
+ * never After Dark. Nobody without a post this week gets an empty section.
+ * Following never removes anything from For You.
  */
 export function followingPeopleFor(ctx: GraphContext, now = Date.now()): FollowingPerson[] {
   const { s } = ctx;
   const since = now - FOLLOWING_WINDOW_MS;
-  const posts = gridPosts(ctx, (a) => !!a && !repo.isMe(a) && !s.blocked[a] && !!(s.following[a] || s.connections[a]), now).filter(
-    (p) => p.kind === 'buzz' && p.createdMs >= since,
-  );
+  const posts = gridPosts(ctx, (a) => !!a && !repo.isMe(a) && !s.blocked[a] && !!(s.following[a] || s.connections[a]), now).filter((p) => p.createdMs >= since);
   const by = new Map<string, ProfilePost[]>();
   for (const p of posts) {
     const list = by.get(p.authorId!) ?? [];

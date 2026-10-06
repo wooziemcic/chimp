@@ -13,7 +13,7 @@ import { colors, radius } from '@/theme';
 import { whenLabel } from '@/utils/format';
 
 /**
- * Buzz → Following (Phase 9, people-first): one person, then their Buzz from
+ * Buzz → Following (Phase 9, people-first): one person, then their posts (Buzz and World posts) from
  * the last 7 days as tiles (photo / video ▶ / text / poll), newest first.
  * Three at first; "View more" shows the rest of THAT person's week only.
  */

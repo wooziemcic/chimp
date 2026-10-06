@@ -47,6 +47,9 @@ export function StoryViewer({ queue, startIndex }: Props) {
   // Phase 8: full-screen route (covers the App Review banner too) → the phone's real insets.
   const insets = useDeviceInsets();
   const { width, height } = useWindowDimensions();
+  // Story reactions: six circles that always fit the row (18-pt side padding, gaps of at least 6),
+  // 44 pt minimum tap target (40-pt circle + hitSlop on the narrowest phones), 48 pt at most.
+  const chip = Math.max(40, Math.min(48, Math.floor((width - 36 - 5 * 6) / 6)));
   const [storyIdx, setStoryIdx] = useState(startIndex);
   const [itemIdx, setItemIdx] = useState(0);
   const [paused, setPaused] = useState<Record<PauseReason, boolean>>({ hold: false, pinch: false, input: false, pan: false });
@@ -335,8 +338,20 @@ export function StoryViewer({ queue, startIndex }: Props) {
                 <>
                   <View style={styles.reactRow} testID="story-reactions">
                     {STORY_REACTIONS.map((r) => (
-                      <Tap key={r} onPress={() => void deliver('reaction', r)} disabled={sending} haptic="light" accessibilityLabel={`React ${r}`} style={styles.reactChip} testID={`story-react-${r}`}>
-                        <T style={{ fontSize: 24 }}>{r}</T>
+                      <Tap
+                        key={r}
+                        onPress={() => void deliver('reaction', r)}
+                        disabled={sending}
+                        haptic="light"
+                        accessibilityLabel={`React ${r}`}
+                        hitSlop={4}
+                        style={[styles.reactChip, { width: chip, height: chip, borderRadius: chip / 2 }]}
+                        testID={`story-react-${r}`}
+                      >
+                        {/* Fixed emoji size + a line height taller than the glyph: never clipped, even with large Dynamic Type. */}
+                        <T allowFontScaling={false} style={{ fontSize: Math.round(chip * 0.46), lineHeight: Math.round(chip * 0.62), textAlign: 'center' }}>
+                          {r}
+                        </T>
                       </Tap>
                     ))}
                   </View>
@@ -424,9 +439,9 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     backgroundColor: colors.white,
   },
-  replyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
-  reactRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 14 },
-  reactChip: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.14)' },
+  replyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 12 },
+  reactRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, columnGap: 6 },
+  reactChip: { alignItems: 'center', justifyContent: 'center', overflow: 'visible', backgroundColor: 'rgba(255,255,255,0.14)' },
   replyInput: {
     flex: 1,
     height: 48,

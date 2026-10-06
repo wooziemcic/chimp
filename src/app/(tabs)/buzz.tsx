@@ -7,6 +7,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { BuzzCard } from '@/components/buzz/BuzzCard';
 import { DriftPager } from '@/components/drift/DriftPager';
+import { DriftTile } from '@/components/drift/DriftTile';
 import { ComposeRow, CreateButton } from '@/components/create/CreateButton';
 import { FollowingPerson } from '@/components/buzz/FollowingPerson';
 import { Button, EmptyState } from '@/components/ui/misc';
@@ -14,25 +15,23 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { Segmented } from '@/components/ui/Segmented';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import { type BuzzTab, type FeedEntry, type FollowingPerson as Person, buildDriftFeed, buzzEngagement, buzzFeed, followingPeopleFor, isAfterDarkRef } from '@/graph/surfaces';
+import { type BuzzTab, type FeedEntry, type FollowingPerson as Person, buildDriftFeed, buzzEngagement, buzzFeed, followingPeopleFor, forYouFeed, isAfterDarkRef } from '@/graph/surfaces';
 import { useGraphCtx, useUnseenChanges } from '@/hooks/useGraph';
 import { useTabBarSpace } from '@/hooks/useLayout';
 import { useDataset } from '@/services/dataset';
 import { useSession } from '@/store/useSession';
 import { colors, radius } from '@/theme';
-import type { BuzzItem } from '@/types/models';
+import type { BuzzItem, DriftItem } from '@/types/models';
 import { engagementScore } from '@/utils/feedOrder';
 
 type Tab = BuzzTab | 'drift';
-type Row = { key: string; item: BuzzItem } | { key: string; person: Person };
+type Row = { key: string; item: BuzzItem } | { key: string; person: Person } | { key: string; world: DriftItem };
 
-// Widths follow the labels a little, so "Trending 🔥" never truncates on a 375-pt phone.
-const TABS: { id: Tab; label: string; flex: number }[] = [
-  { id: 'forYou', label: 'For You', flex: 1 },
-  { id: 'following', label: 'Following', flex: 1.12 },
-  // Phase 9: 🔥 means Trending (engagement + recency) and nothing else.
-  { id: 'trending', label: 'Trending 🔥', flex: 1.34 },
-  { id: 'drift', label: 'Drift', flex: 0.74 },
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'forYou', label: 'For You' },
+  { id: 'following', label: 'Following' },
+  { id: 'trending', label: 'Trending' },
+  { id: 'drift', label: 'Drift' },
 ];
 
 /**
@@ -86,6 +85,8 @@ export default function BuzzScreen() {
   const rows = useMemo<Row[]>(() => {
     if (tab === 'drift') return [];
     if (tab === 'following') return followingPeopleFor(ctx, orderAt).map((p) => ({ key: `p:${p.personId}`, person: p }));
+    // For You = discovery: everything you may see from anyone, World posts included (Phase 9 polish).
+    if (tab === 'forYou') return forYouFeed(ctx, orderAt).map((e) => (e.kind === 'world' ? { key: `w:${e.item.id}`, world: e.item } : { key: e.item.id, item: e.item }));
     return buzzFeed(ctx, tab, orderAt).map((b) => ({ key: b.id, item: b }));
   }, [ctx, tab, orderAt]);
 
@@ -196,6 +197,11 @@ export default function BuzzScreen() {
         renderItem={({ item: row }) =>
           'person' in row ? (
             <FollowingPerson person={row.person} tile={tile} />
+          ) : 'world' in row ? (
+            // A World post (photo / clip): the existing World card — World and creator shown on it.
+            <View style={styles.row} testID={`foryou-world-${row.world.id}`}>
+              <DriftTile item={{ ...row.world, tall: false }} width={full} />
+            </View>
           ) : (
             <View style={styles.row}>
               <BuzzCard item={row.item} width={full} />

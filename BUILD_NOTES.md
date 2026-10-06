@@ -36,10 +36,37 @@ New in-app events + pushes (category **Activity**, its own switch in Settings): 
 **Older TestFlight builds**: activity pushes start OFF on the server (`notification_prefs.activity` null) and this build turns them on once per account on push registration — older builds can't turn them off or open them, so they never get them. They still work otherwise and ignore the new in-app event kinds.
 
 ### Buzz → Following (people-first)
-One section per person you follow (or are connected with) who posted Buzz in the last 7 days: avatar, name, `@username`, newest first, 3 posts then "View more · N" for the rest of THAT person's week. Ordered by each person's latest post; no empty sections. Empty: "It's quiet here." / "People you follow haven't posted this week." + **Find people** → Happening's people section. For You, Trending and Drift unchanged.
+**Following groups eligible Buzz + World posts from followed/connected people from the last 7 days.**
+One section per person you follow (or are connected with) who posted in the last 7 days: avatar, name, `@username`, newest first, 3 posts then "View more · N" for the rest of THAT person's week. Ordered by each person's latest post; no empty sections. Empty: "It's quiet here." / "People you follow haven't posted this week." + **Find people** → Happening's people section. For You, Trending and Drift unchanged.
+**Final fix — World posts in Following.** A person's section now holds their eligible posts from the last 7 days across their Buzz (Just Buzz or in a World) **and their World photos / clips**:
+- the same canonical items as their profile, one tile per post (never a duplicate)
+- World posts open `/drift/<id>`
+- PUBLIC World → yes; CONNECTIONS World → only if you already have access; PRIVATE World → only if you're a member
+- nobody you blocked, never After Dark
 
-### The flame
-Audit: the flame was the generic **Buzz tab-bar icon**. It is now a speech-bubble icon; 🔥 appears only on the **Trending 🔥** segment (engagement + recency). Segment widths follow their labels so "Trending 🔥" never truncates (checked at 375 / 390 / 430 pt).
+Before you follow someone, their public posts can appear in For You but they are not in Following. After you follow them, the same posts are grouped under them in Following and stay in For You. (`followingPeopleFor` in `src/graph/surfaces.ts`; layout, window and View more unchanged.)
+
+### Buzz tab icon and Trending label (final polish)
+The flame is the **Buzz tab-bar icon** again. The sub-tabs read exactly **For You · Following · Trending · Drift**, with no emoji. Trending's ranking is unchanged.
+
+### For You = discovery (final polish)
+**Root cause** of "Onkar's post is on his profile and in Drift but not in For You": For You was built from Buzz items only. A post into a **World** (a World photo or clip, stored as a Drift item) reached profile Recent posts and Drift, but **could never reach For You** — whatever the relationship. A stranger's public *Buzz* already appeared; the Node test reproduces both cases.
+**Fix** (`forYouFeed` in `src/graph/surfaces.ts`, rows in `src/app/(tabs)/buzz.tsx`):
+- For You now takes every post the account may see, from anyone: Buzz (Just Buzz, or in a World it may see) plus World posts. World posts use the existing World card (`DriftTile`), which shows the World and the creator; tapping opens `/drift/<id>`.
+- Newest first, as before.
+- Eligibility is about visibility only:
+  - PUBLIC World → yes
+  - CONNECTIONS World → only if already allowed in
+  - PRIVATE World → only for members
+  - never blocked people, never After Dark
+- Following or connection never decides eligibility.
+- Following, Trending and Drift are unchanged. The Demo keeps its curated Buzz-only For You.
+
+### Story reaction row (final polish)
+- The six reactions are sized from the screen width (48-pt circles on 375–430 pt; never below 40 pt, with a hit slop that keeps the target ≥ 44 pt).
+- They use a fixed emoji size with a taller line box, so glyphs are never clipped, even with large Dynamic Type.
+- There is a minimum 6-pt gap, 12 pt above the reply box, and the existing bottom safe-area padding and keyboard avoidance are unchanged.
+- Story → DM logic is untouched.
 
 ### World deletion (release blocker) — fixed
 **Root cause.** The app deleted a World by calling the `delete-world` Edge Function, and surfaced the SDK's generic "Edge Function returned a non-2xx status code". Our function always answers with JSON `{error}`, so that message came from the Supabase platform before our code ran: function not deployed (404), the gateway's "Enforce JWT verification" rejecting the token (401 — common with the new JWT signing keys), or a boot error. The client only read `body.error`, so the platform's own message was never shown. The database side was never the problem: `delete_world` on an empty Connections World ("Haircut": 0 posts, 1 member, 0 followers) succeeds (DB test W2a).
@@ -131,7 +158,9 @@ Video:
 - [ ] New EAS build installed by at least two testers; Settings → Notifications shows Messages, Connections, After Dark, Activity.
 - [ ] Happening on a brand-new account: calm empty states, nothing invented; on an active account: 3–5 Happening-now cards with honest reasons.
 - [ ] Search: two Worlds with the same name show different "by @owner".
-- [ ] Buzz → Following: sections per person, View more, empty state → Find people; tabs read For You · Following · Trending 🔥 · Drift (no truncation on the smallest phone in the cohort).
+- [ ] Buzz → Following: sections per person (Buzz + World photos), View more, empty state → Find people; follow someone new → their public Buzz and World photo appear under them and stay in For You; tabs read For You · Following · Trending · Drift; the Buzz tab icon is the flame.
+- [ ] For You: a post from someone nobody follows (Just Buzz and a photo in a public World) shows up for everyone; a post in a private / Connections World only for people allowed in.
+- [ ] Story reactions: all six fully visible above the reply box on the smallest and largest phones in the cohort, with and without the keyboard.
 - [ ] Story reply/reaction → DM; expired context after 24 h.
 - [ ] Notifications: like / reply / follow / connection request / accepted / World post / World join / story reply each arrive once, open the right screen, respect Activity off, blocks, deletion.
 - [ ] Receipts: Sent → Delivered while backgrounded → Seen on open (two-iPhone steps 1–6).
@@ -162,7 +191,7 @@ Video:
   - Updated Following suite: o10_web 44/44.
   - Regression: post9 31, msg8 23, r8_layout 248, l7_layout 88, c7 18, ad7 56 + 56, review 31, ph 36, ad7_sweep 12, ad7_real 6, b7 23, tt7 10, chat 38, m7 80, b5_nav 31, b5p2 13, d6 72, av 15, smoke 33, cycles complete with 0 page errors, Demo sweep 0 errors.
   - c6 66/67: the one failure ("Buzz ready before the network load") also fails on the pre-Phase-9 baseline.
-- **Test updates:** checks for the retired node canvas and the old Following grid were rewritten for the new screens. The labels "Trending 🔥" and the new search placeholder were updated.
+- **Test updates:** checks for the retired node canvas and the old Following grid were rewritten for the new screens. The new search placeholder was updated. Final polish: For You discovery Node tests (83/83 in the Phase 9 suite) and web checks D1–D6 (stranger's Just Buzz and public-World photo appear; private World doesn't; not in Following; exact tab labels), plus Story reaction layout at 375 / 390 / 430 pt (S9–S10); Phase 9 web suite 49/49 (incl. D6b–D8: follow a stranger → his Buzz + World photo grouped under him, still in For You). Following fix: Node F-1–F-10 (no relationship → For You only; follow → both items under the person, newest first; Connections / private Worlds only with access; blocked never; 7-day window) — Phase 9 Node suite 93/93.
 
 
 # Chimp build notes — v0.8 — Device Reliability, Responsive iOS System, Messaging v2, Posting Reliability, Content Ordering

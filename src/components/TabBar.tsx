@@ -1,6 +1,6 @@
 import { type Href, router } from 'expo-router';
 import type { BottomTabBarProps } from 'expo-router/js-tabs';
-import { LayoutGrid, LucideIcon, MessagesSquare, Moon, Orbit, User } from 'lucide-react-native';
+import { Flame, LayoutGrid, LucideIcon, Moon, Orbit, User } from 'lucide-react-native';
 import { useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -22,9 +22,7 @@ import { T } from './ui/Text';
  */
 const TABS: Record<string, { label: string; Icon: LucideIcon; fillable: boolean }> = {
   boards: { label: 'Boards', Icon: LayoutGrid, fillable: true },
-  // Phase 9: Buzz is the conversation layer (For You opens first), so its icon is
-  // a conversation, not a flame. 🔥 now means one thing only: Trending.
-  buzz: { label: 'Buzz', Icon: MessagesSquare, fillable: true },
+  buzz: { label: 'Buzz', Icon: Flame, fillable: true },
   happening: { label: 'Happening', Icon: Orbit, fillable: false },
   you: { label: 'You', Icon: User, fillable: true },
   'after-dark': { label: 'After Dark', Icon: Moon, fillable: true },
