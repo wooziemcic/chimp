@@ -129,6 +129,8 @@ function profileEdits(p: ProfileRow) {
 }
 
 let unsubDemo: (() => void) | null = null;
+/** Phase 9.1: the account whose world is being reloaded right now (one reload at a time). */
+let reloading: string | null = null;
 let stopWatch: (() => void) | null = null;
 
 function publishDemo() {
@@ -328,6 +330,11 @@ export const useSession = create<SessionState>((set, get) => {
     refresh: async () => {
       const uid = get().uid;
       if (get().mode !== 'real' || !uid) return;
+      // Phase 9.1: a second call while this account's world is already loading
+      // (launch revalidation + reconnect + an activity event) doesn't start
+      // another full reload — the running one brings the same data.
+      if (reloading === uid) return;
+      reloading = uid;
       set({ syncing: true });
       try {
         const world = await withRetry(() => loadRealWorld(uid), { label: 'world' });
@@ -367,6 +374,7 @@ export const useSession = create<SessionState>((set, get) => {
         set({ error: userMessage(e, 'Couldn’t refresh. Pull to try again.') });
         realData.markLoaded();
       } finally {
+        if (reloading === uid) reloading = null;
         set({ syncing: false });
       }
     },

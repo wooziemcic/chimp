@@ -192,7 +192,13 @@ export default function YouScreen() {
         </View>
 
         <View style={styles.pair}>
-          <BoardStackCard title="Saved Boards" boards={saved} countLabel={(b) => postsLabel(repo.boardPostCount(b.id))} onSeeAll={() => router.navigate('/boards')} empty="Nothing saved yet." />
+          <BoardStackCard
+            title="Saved Boards"
+            boards={saved}
+            countLabel={(b) => postsLabel(repo.boardPostCount(b.id))}
+            onSeeAll={() => router.navigate({ pathname: '/boards', params: { segment: 'saved', at: String(Date.now()) } })}
+            empty="Nothing saved yet."
+          />
           {mine.length || real ? (
             <BoardStackCard title="Your Boards" boards={mine} countLabel={(b) => `${b.memberCount} ${b.memberCount === 1 ? 'member' : 'members'} · ${postsLabel(repo.boardPostCount(b.id))}`} onSeeAll={() => router.navigate('/boards')} empty="You haven’t joined a World yet." />
           ) : null}

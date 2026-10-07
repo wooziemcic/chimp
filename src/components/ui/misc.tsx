@@ -1,5 +1,5 @@
 import { ChevronRight } from 'lucide-react-native';
-import { ReactNode } from 'react';
+import { ReactNode, useState } from 'react';
 import { ActivityIndicator, StyleSheet, View, ViewStyle } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
 
@@ -24,10 +24,14 @@ export function SectionHeader({
   style?: ViewStyle;
   right?: ReactNode;
 }) {
+  // Phase 9.1: iOS sizes an adjustsFontSizeToFit title once, on its first layout. A section that
+  // first lays out before its row has its real width (the REAL You screen, filled in after the
+  // account's data arrives) kept a tiny title. Re-measure whenever the title's width changes.
+  const [titleW, setTitleW] = useState(0);
   return (
     <View style={[styles.sectionRow, style]}>
-      <View style={{ flex: 1 }}>
-        <T v="title2" color={dark ? colors.white : colors.ink} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8} style={{ fontSize: 24, lineHeight: 30 }}>
+      <View style={{ flex: 1 }} onLayout={(e) => setTitleW(Math.round(e.nativeEvent.layout.width))}>
+        <T key={titleW} v="title2" color={dark ? colors.white : colors.ink} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8} style={{ fontSize: 24, lineHeight: 30 }}>
           {title}
         </T>
         {subtitle ? (

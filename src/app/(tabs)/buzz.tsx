@@ -65,7 +65,10 @@ export default function BuzzScreen() {
   const full = width - 32;
   const worldUpdates = useUnseenChanges().filter((c) => !isAfterDarkRef(c.ref) && (c.type === 'BOARD_ACTIVITY' || c.type === 'STORY_UPDATE' || c.type === 'NEW_CONNECTION_ACTIVITY'));
 
-  const syncing = useSession((s) => s.syncing);
+  // Phase 9.1: the pull-to-refresh spinner shows only for a pull YOU made. Background
+  // revalidation (launch, reconnect, new activity) updates the content silently —
+  // it used to drive this spinner (useSession.syncing) for the whole reload.
+  const [pulling, setPulling] = useState(false);
   const refresh = useSession((s) => s.refresh);
   const refreshLikes = useSession((s) => s.refreshLikes);
   const data = useDataset();
@@ -169,12 +172,21 @@ export default function BuzzScreen() {
         initialNumToRender={tab === 'following' ? 8 : 6}
         windowSize={7}
         contentContainerStyle={{ paddingBottom: bottom, gap: tab === 'following' ? 12 : 10 }}
-        refreshing={real ? syncing && !loading : false}
+        refreshing={real ? pulling && !loading : false}
         onRefresh={
           real
             ? () => {
                 setOrderAt(Date.now());
-                void refresh();
+                setPulling(true);
+                // If a background reload was already running, the pull joins it: stop when it lands.
+                void refresh().finally(() => {
+                  if (!useSession.getState().syncing) return setPulling(false);
+                  const off = useSession.subscribe((st) => {
+                    if (st.syncing) return;
+                    off();
+                    setPulling(false);
+                  });
+                });
               }
             : undefined
         }

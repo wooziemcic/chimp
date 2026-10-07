@@ -2,6 +2,45 @@
 
 Branch `phase-9`. Not merged, not built, not submitted. Everything below was tested on a local Postgres 16, in Node against the real app modules, and in a Chromium web build against Supabase mocks — **not on an iPhone**. The two-iPhone checklist below is still to do.
 
+## Phase 9.1 — quick fixes (no migration, no schema change, no feed logic change)
+
+1. **Launch refresh spinner stayed up.** Root cause: Buzz's pull-to-refresh spinner was bound to `useSession.syncing`. That flag is true for *every* world reload, including the background revalidation that starts at launch right after cached content renders (`enterReal → refresh()` → `loadRealWorld`, ~25 requests in two waves, with retries on a bad connection). So the spinner showed for the whole background reload.
+   - Fix: the spinner now shows only for a pull you made (local `pulling` state in `src/app/(tabs)/buzz.tsx`; a pull that lands on a running reload waits for it).
+   - `refresh()` is single-flight per account (`src/store/useSession.ts`): a second call while one is running — reconnect, an activity event — joins it instead of starting another full reload.
+   - On the web build, launch with cached content makes exactly one background reload (no duplicate found). First launch with nothing cached still shows the loading skeleton.
+2. **You → Saved Boards opened Boards on Joined.** Root cause: it navigated to `/boards` with no parameter, and Boards' segment was local state defaulting to Joined. It now opens `/boards?segment=saved&at=…` (`src/app/(tabs)/you.tsx`). Boards reads `segment` (`src/app/(tabs)/boards.tsx`; `at` makes every tap apply again). The plain Boards tab still opens on Joined.
+3. **REAL "People You Should Meet" header tiny.** REAL and Demo use the same `SectionHeader` (24 pt title, `adjustsFontSizeToFit`, minimum scale 0.8). Root cause (inferred — not reproduced on an iPhone): iOS sizes a shrink-to-fit title once, on its first layout. On the REAL You screen that first layout can happen before the row has its final width (the screen fills in as the account's data arrives), and the title kept the shrunken size. The same iOS behaviour was fixed for the Buzz tabs in Build 5. The title now re-measures when its width changes (`src/components/ui/misc.tsx`), so REAL ends up exactly like Demo. Recommendation cards and matching are unchanged.
+4. **Chat settles slowly / Delivered late.** States are unchanged in meaning:
+   - **Sent** = the server saved it.
+   - **Delivered** = the recipient's app received it and acknowledged (`mark_delivered`, from the live message or the inbox sync; Phase 9 also from a background push). Never because the sender's upload succeeded.
+   - **Seen** = the recipient has the chat open in the foreground (`mark_read_upto`).
+
+   The sender sees a change when the recipient's `conversation_members` cursor moves (Realtime).
+
+   Root causes:
+   - **Delays stacked up.** The recipient waited 600 ms before acknowledging. The sender's app then waited 250 ms after the cursor event and made a second request (`chat_receipts`) before the label changed.
+   - **Opening a chat waited on two round trips.** Receipts were only requested after the message list arrived.
+
+   Fixes, all in `src/store/useChat.ts` plus a pure helper in `src/utils/receipts.ts`:
+   - The acknowledgement waits 150 ms instead of 600.
+   - The cursor event updates Delivered / Seen immediately. The helper moves cursors forward only, never for members the server hides, and `chat_receipts` still re-reads it as the authority.
+   - Receipts load alongside the messages when a chat opens.
+
+   On the web build with a recipient online but not in the chat, Delivered appeared about 0.3 s after send (was about 1.0 s). Sending causes no full chat-list reload on the sender's side.
+
+   Not changed:
+   - No polling was found.
+   - A chat opened for the first time since launch still waits for its messages; reopened chats show their in-memory messages at once.
+   - The iOS background limits from Phase 9 still apply.
+
+Checks:
+- TypeScript and lint clean.
+- Node: Phase 9.1 12/12 (single-flight reload, receipt cursor patch C1–C7).
+- Web: Phase 9.1 11/11 (launch reloads, Saved Boards path ×2, plain Boards default, People header REAL ≥1 / REAL 0 = Demo), plus focused regressions:
+  - Node: Phase 9 93/93, p8 52, m7 38, c7client 24, push7 33, t7 14, a7 90, scenario6 all passed
+  - Web: receipts 23/23, chat 38/38, groups/messaging 80/80, Phase 9 49/49, feeds/Following 44/44, navigation 31/31, App Review Demo 31/31
+  - Simulated (web), not an iPhone.
+
 ## What you must do once (in this order)
 
 1. **SQL** — Supabase → SQL Editor → run `supabase/migrations/0012_phase9_social.sql` once. It checks that 0011 is applied first. It is additive and idempotent: running it twice is safe. Do **not** re-run 0001–0011.

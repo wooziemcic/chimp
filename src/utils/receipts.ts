@@ -111,3 +111,28 @@ export function receiptMessageId(list: readonly { id: string; senderId: string; 
   }
   return undefined;
 }
+
+/**
+ * Phase 9.1: apply a member's cursor move from Realtime (`conversation_members`
+ * UPDATE: last_read_at / last_delivered_at) to receipts already on screen, so
+ * Delivered / Seen show the moment the event lands — chat_receipts() still
+ * re-reads right after and stays authoritative. Only rows the server already
+ * shows (non-null cursors) move, only forward; anything else: null (no change).
+ */
+export function applyCursor(
+  rows: ReceiptRow[] | null | undefined,
+  change: { user_id?: string | null; status?: string | null; last_read_at?: string | null; last_delivered_at?: string | null } | undefined,
+): ReceiptRow[] | null {
+  if (!rows || !change?.user_id || !change.last_read_at) return null;
+  const i = rows.findIndex((r) => r.user_id === change.user_id);
+  const cur = i >= 0 ? rows[i] : undefined;
+  if (!cur || cur.read_at === null || cur.delivered_at === null) return null; // hidden by the server (request / declined / blocked)
+  if (change.status && change.status !== cur.status) return null; // a membership change: let the server decide
+  const later = (a: string | null | undefined, b: string | null | undefined) => (!a ? b ?? null : !b ? a : serverMicros(b) > serverMicros(a) ? b : a);
+  const read = later(cur.read_at, change.last_read_at);
+  const delivered = later(later(cur.delivered_at, change.last_delivered_at), read);
+  if (read === cur.read_at && delivered === cur.delivered_at) return null;
+  const next = [...rows];
+  next[i] = { ...cur, read_at: read, delivered_at: delivered };
+  return next;
+}

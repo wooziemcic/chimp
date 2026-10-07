@@ -1,3 +1,4 @@
+import { useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { LayoutGrid } from 'lucide-react-native';
 import { useMemo, useState } from 'react';
@@ -25,7 +26,17 @@ type Segment = 'joined' | 'discover' | 'saved';
  * Discover is ranked by the graph and each card says why.
  */
 export default function BoardsScreen() {
-  const [segment, setSegment] = useState<Segment>('joined');
+  // Phase 9.1: `/boards?segment=saved&at=…` (You → Saved Boards) opens straight into
+  // that segment; `at` makes a repeat tap apply again. The plain Boards tab still opens on Joined.
+  const params = useLocalSearchParams<{ segment?: string; at?: string }>();
+  const asked = params.segment === 'saved' || params.segment === 'discover' || params.segment === 'joined' ? (params.segment as Segment) : null;
+  const askKey = asked ? `${asked}:${params.at ?? ''}` : null;
+  const [segment, setSegment] = useState<Segment>(asked ?? 'joined');
+  const [lastAsk, setLastAsk] = useState(askKey);
+  if (askKey !== lastAsk) {
+    setLastAsk(askKey);
+    if (asked) setSegment(asked);
+  }
   const joined = useChimp((s) => s.joined);
   const saved = useChimp((s) => s.savedBoards);
   const signals = useSignals();

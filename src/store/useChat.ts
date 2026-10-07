@@ -36,7 +36,7 @@ import { repo } from '@/services/repository';
 import type { User } from '@/types/models';
 import { onAccountChange } from './useSession';
 import { logEvent } from '@/services/analytics';
-import { serverMicros } from '@/utils/receipts';
+import { applyCursor, serverMicros } from '@/utils/receipts';
 
 export interface ChatMsg {
   id: string;
@@ -225,7 +225,8 @@ let deliverTimer: ReturnType<typeof setTimeout> | null = null;
 /** status|role|joined per member, to tell a cursor-only change from a real membership change. */
 const memberSig = new Map<string, string>();
 const READ_DEBOUNCE_MS = 300;
-const DELIVER_DEBOUNCE_MS = 600;
+// Phase 9.1: 600 → 150 ms. Still folds a burst into one write, without making Delivered wait.
+const DELIVER_DEBOUNCE_MS = 150;
 const RECEIPTS_DEBOUNCE_MS = 250;
 
 const sigOf = (r: Partial<MemberRow> | undefined) => (r ? `${r.status ?? '?'}|${r.role ?? '?'}|${r.joined_at ?? '?'}` : '');
@@ -569,6 +570,11 @@ export const useChat = create<ChatState>((set, get) => {
         if (!cursorOnly) {
           void refresh.members(cid).catch(() => {});
           reloadSoon();
+        } else {
+          // Phase 9.1: show the moved cursor (Delivered / Seen) at once from the event itself;
+          // chat_receipts() below re-reads and stays the authority.
+          const patched = applyCursor(get().receipts[cid], r);
+          if (patched) set({ receipts: { ...get().receipts, [cid]: patched } });
         }
         loadReceipts(cid);
       },
@@ -736,6 +742,9 @@ export const useChat = create<ChatState>((set, get) => {
       const c = get().conversations[conversationId];
       if (c?.unread && canSee(conversationId)) set({ conversations: { ...get().conversations, [c.id]: { ...c, unread: 0 } } });
       subscribeOpen(conversationId);
+      // Phase 9.1: receipts load alongside the messages (was: after them — one extra round trip
+      // before the status line settled).
+      loadReceipts(conversationId, 0);
       void get().loadExtras(conversationId);
       try {
         const rows = await api.fetchMessages(conversationId);
@@ -749,7 +758,6 @@ export const useChat = create<ChatState>((set, get) => {
         void ensurePeople(confirmed.map((m) => m.senderId));
         // Phase 8: Seen only if I'm actually looking (foreground), up to what's on screen.
         markSeen(conversationId);
-        loadReceipts(conversationId, 0);
       } catch (e) {
         set({ error: errText(e) });
       }
