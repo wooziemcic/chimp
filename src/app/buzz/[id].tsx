@@ -5,7 +5,7 @@ import { FlatList, KeyboardAvoidingView, Platform, StyleSheet, TextInput, useWin
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { BuzzCard, useReplyCount } from '@/components/buzz/BuzzCard';
-import { ReplyingTo, ThreadActions, ThreadIndent } from '@/components/comments/Thread';
+import { ReplyingTo, ThreadActions, ThreadBody, ThreadIndent, ThreadMenuSlot } from '@/components/comments/Thread';
 import { Avatar } from '@/components/ui/Avatar';
 import { Button, EmptyState } from '@/components/ui/misc';
 import { OwnerMenu } from '@/components/ui/OwnerMenu';
@@ -56,6 +56,10 @@ export default function BuzzThread() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [replyTo, setReplyTo] = useState<BuzzReply | null>(null);
   const rows = useMemo(() => threadRows(replies, collapsed), [replies, collapsed]);
+  const byId = useMemo(() => new Map(replies.map((r) => [r.id, r])), [replies]);
+  // Collapse a branch from its thread line; open it again from "N replies" (or the parent's text).
+  const collapse = (rid: string) => setCollapsed((c) => (c[rid] ? c : { ...c, [rid]: true }));
+  const expand = (rid: string) => setCollapsed((c) => (c[rid] ? toggleThread(c, rid) : c));
   const nameOf = (r: BuzzReply) => (repo.isMe(r.authorId) ? 'yourself' : repo.user(r.authorId)?.displayName ?? 'Someone');
 
   if (!item) return <EmptyState title="This post isn’t available" body="It may have been deleted, or you no longer have access." action={<Button label="Go back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/buzz'))} />} />;
@@ -123,19 +127,22 @@ export default function BuzzThread() {
             const u = repo.user(r.authorId);
             const settled = !r.status && !r.id.startsWith('local') && !r.id.startsWith('br_');
             return (
-              <ThreadIndent depth={row.depth}>
+              <ThreadIndent depth={row.depth} onCollapse={r.parentId && byId.has(r.parentId) ? () => collapse(r.parentId!) : undefined} parentName={r.parentId && byId.get(r.parentId) ? nameOf(byId.get(r.parentId)!) : undefined}>
               <View style={styles.reply} testID="reply-row">
                 <Avatar uri={repo.isMe(r.authorId) ? myAvatar : u?.avatar} name={u?.displayName} size={32} />
                 <View style={{ flex: 1, marginLeft: 10 }}>
-                  <T v="footnote" weight="700">
-                    {repo.isMe(r.authorId) ? repo.me().displayName || 'You' : u?.displayName ?? 'Someone'}
-                    <T v="footnote" color={colors.inkFaint} weight="400">
-                      {r.status === 'sending' ? '  ·  Sending…' : `  ·  ${whenLabel(r.createdAtMs ?? r.createdAt)}${r.editedAtMs ? ' · Edited' : ''}`}
+                  {/* Name, time and text: tapping them collapses / expands this reply's own replies. */}
+                  <ThreadBody replies={row.replies} collapsed={!!collapsed[r.id]} onToggle={() => setCollapsed((c) => toggleThread(c, r.id))} label={r.body}>
+                    <T v="footnote" weight="700">
+                      {repo.isMe(r.authorId) ? repo.me().displayName || 'You' : u?.displayName ?? 'Someone'}
+                      <T v="footnote" color={colors.inkFaint} weight="400">
+                        {r.status === 'sending' ? '  ·  Sending…' : `  ·  ${whenLabel(r.createdAtMs ?? r.createdAt)}${r.editedAtMs ? ' · Edited' : ''}`}
+                      </T>
                     </T>
-                  </T>
-                  <T v="subhead" weight="400" color={colors.ink2} style={{ marginTop: 2 }}>
-                    {r.body}
-                  </T>
+                    <T v="subhead" weight="400" color={colors.ink2} style={{ marginTop: 2 }}>
+                      {r.body}
+                    </T>
+                  </ThreadBody>
                   <ThreadActions
                     onReply={
                       settled || repo.mode() !== 'real'
@@ -148,11 +155,12 @@ export default function BuzzThread() {
                     }
                     replies={row.replies}
                     collapsed={!!collapsed[r.id]}
-                    onToggle={() => setCollapsed((c) => toggleThread(c, r.id))}
+                    onToggle={() => expand(r.id)}
                     replyTo={row.replyTo ? nameOf(row.replyTo) : undefined}
                   />
                 </View>
                 {repo.mode() === 'real' && repo.isMe(r.authorId) && !r.status && !r.id.startsWith('local') ? (
+                  <ThreadMenuSlot>
                   <OwnerMenu
                     what="reply"
                     size={16}
@@ -172,6 +180,7 @@ export default function BuzzThread() {
                       }
                     }}
                   />
+                  </ThreadMenuSlot>
                 ) : null}
               </View>
               </ThreadIndent>

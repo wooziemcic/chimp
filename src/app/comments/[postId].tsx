@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, KeyboardAvoidingView, Platform, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ReplyingTo, ThreadActions, ThreadIndent } from '@/components/comments/Thread';
+import { ReplyingTo, ThreadActions, ThreadBody, ThreadIndent, ThreadMenuSlot } from '@/components/comments/Thread';
 import { Avatar } from '@/components/ui/Avatar';
 import { EmptyState } from '@/components/ui/misc';
 import { OwnerMenu } from '@/components/ui/OwnerMenu';
@@ -81,6 +81,10 @@ export default function CommentsSheet() {
   // Phase 9.2: threads — replies under the comment they answer; any thread can be collapsed.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const rows = useMemo(() => threadRows(comments, collapsed), [comments, collapsed]);
+  const byId = useMemo(() => new Map(comments.map((c) => [c.id, c])), [comments]);
+  // Collapse a branch from its thread line; open it again from "N replies" (or the parent's text).
+  const collapse = (id: string) => setCollapsed((c) => (c[id] ? c : { ...c, [id]: true }));
+  const expand = (id: string) => setCollapsed((c) => (c[id] ? toggleThread(c, id) : c));
   const [replyTo, setReplyTo] = useState<Comment | null>(null);
   const userFor = (id: string) => repo.user(id) ?? people[id];
   const nameOf = (c: Comment) => {
@@ -158,7 +162,7 @@ export default function CommentsSheet() {
           const masked = item.authorMode !== 'public';
           const settled = !item.status && !item.id.startsWith('local');
           return (
-            <ThreadIndent depth={row.depth}>
+            <ThreadIndent depth={row.depth} onCollapse={item.parentId && byId.has(item.parentId) ? () => collapse(item.parentId!) : undefined} parentName={item.parentId && byId.get(item.parentId) ? nameOf(byId.get(item.parentId)!) : undefined}>
             <View style={{ flexDirection: 'row' }} testID="comment-row">
               {masked ? (
                 <View style={styles.mask}>
@@ -168,13 +172,16 @@ export default function CommentsSheet() {
                 <Avatar uri={mine ? avatarUri : u?.avatar} name={u?.displayName} size={36} />
               )}
               <View style={{ flex: 1, marginLeft: 10 }}>
-                <T v="footnote" weight="700">
-                  {masked ? (mine ? `${pseudonym} (you)` : 'Verified member') : mine ? `${me.username} (you)` : u?.displayName ?? 'Chimp member'}
-                  <T v="footnote" color={colors.inkFaint} weight="400">{item.status === 'sending' ? '  Sending…' : `  ${whenLabel(item.createdAt)}${item.editedAt ? ' · Edited' : ''}`}</T>
-                </T>
-                <T v="subhead" weight="400" color={colors.ink2} style={{ marginTop: 2 }}>
-                  {item.body}
-                </T>
+                {/* Name, time and text: tapping them collapses / expands this comment's own replies. */}
+                <ThreadBody replies={row.replies} collapsed={!!collapsed[item.id]} onToggle={() => setCollapsed((c) => toggleThread(c, item.id))} label={item.body}>
+                  <T v="footnote" weight="700">
+                    {masked ? (mine ? `${pseudonym} (you)` : 'Verified member') : mine ? `${me.username} (you)` : u?.displayName ?? 'Chimp member'}
+                    <T v="footnote" color={colors.inkFaint} weight="400">{item.status === 'sending' ? '  Sending…' : `  ${whenLabel(item.createdAt)}${item.editedAt ? ' · Edited' : ''}`}</T>
+                  </T>
+                  <T v="subhead" weight="400" color={colors.ink2} style={{ marginTop: 2 }}>
+                    {item.body}
+                  </T>
+                </ThreadBody>
                 <ThreadActions
                   onReply={
                     settled
@@ -187,11 +194,12 @@ export default function CommentsSheet() {
                   }
                   replies={row.replies}
                   collapsed={!!collapsed[item.id]}
-                  onToggle={() => setCollapsed((c) => toggleThread(c, item.id))}
+                  onToggle={() => expand(item.id)}
                   replyTo={row.replyTo ? nameOf(row.replyTo) : undefined}
                 />
               </View>
               {real && mine && settled ? (
+                <ThreadMenuSlot>
                 <OwnerMenu
                   what="reply"
                   size={16}
@@ -216,6 +224,7 @@ export default function CommentsSheet() {
                     }
                   }}
                 />
+                </ThreadMenuSlot>
               ) : null}
             </View>
             </ThreadIndent>

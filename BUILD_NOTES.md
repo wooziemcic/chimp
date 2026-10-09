@@ -2,6 +2,110 @@
 
 Branch `phase-9`. Not merged, not built, not submitted. Everything below was tested on a local Postgres 16, in Node against the real app modules, and in a Chromium web build against Supabase mocks — **not on an iPhone**. The two-iPhone checklist below is still to do.
 
+## Phase 9.2 QA fixes: photo saves on Choose, HEIC Stories, reply-card collapse
+
+There is no SQL, no schema change and no new package in this section.
+
+- **Profile photo**
+  - "Choose" in the photo picker is now the commit point. Camera and Library both work this way.
+  - The new photo uploads and links at once, through the same `setProfilePhoto()` path as before.
+  - Only the photo is sent. Unsaved field edits stay unsaved, and the bottom Save is for those fields.
+  - The "Save photo" button is gone. "Saving…" shows while it uploads, then "Photo saved".
+  - **On failure:**
+    - A short message appears and the previous photo stays, on the server and on screen.
+    - If the file uploaded but linking failed, that file is removed. This happens only when the server confirms the profile doesn't use it.
+    - To retry, choose the photo again.
+  - Cancelling the picker does nothing.
+- **HEIC Stories:** see "Root cause" and "Fix" below.
+  - **Root cause:**
+    - The library picker asked iOS for the photo's *current* representation (`preferredAssetRepresentationMode: Current`, the earlier posting-reliability speed-up).
+    - For some library photos (iCloud-optimised, edited or shared HEIC), iOS can't hand that `public.heic` file over without transcoding.
+    - So `expo-image-picker` threw `FailedToReadImageException` ("Cannot load representation of type public.heic"), and the raw text reached the screen.
+  - **Fix:**
+    - Single-photo picks (Story, profile, covers, chat) now ask for the *compatible* representation, so iOS converts HEIC to JPEG itself. `quality` is unchanged at 1.
+    - Chimp's existing `prepareImage()` then makes the usual ≤1600 px JPEG for upload, as it already did for every photo. The upload format is unchanged.
+    - Multi-select (Buzz) keeps `Current` for speed.
+    - Picker and processing failures now show a plain sentence. Native error text is never shown, and it is logged only in development builds, with file paths removed.
+- **Comment threads**
+  - Tapping the text of any comment or reply that has replies collapses or expands its own branch, at every level.
+  - The avatar, Reply, "N replies" and ••• sit outside that tap area, so they never collapse anything.
+  - The thread line keeps its 2 px look, but its touch strip is now 24 px plus 8 px of hit slop.
+
+
+### What you must do once
+- **SQL:** in the Supabase SQL Editor, run `supabase/migrations/0014_story_views.sql` once.
+  - It checks that 0013 is applied first.
+  - It is additive and idempotent, so running it twice is safe.
+  - Do **not** re-run 0001–0013.
+- Before 0014 is applied, the app simply doesn't show "Seen by" and doesn't record views.
+- No new package, Edge Function or secret.
+
+### What changed
+1. **Profile photo: Save photo.**
+   - **Cause:** picking a photo in Edit profile only set it locally. The upload ran only with the bottom Save at the end of the form.
+   - **Fix:** once a new photo is waiting, a "Save photo" button appears to the right of the photo (`src/app/edit-profile.tsx`).
+     - It saves only the photo, through the same `setProfilePhoto()` upload + link path, so the previous photo is cleaned up as before. Unsaved name / city / bio / Open To edits are not sent.
+     - It shows "Saving…", a clear message if the save fails (the photo stays waiting so you can retry), then "Photo saved".
+     - The new photo shows everywhere at once and survives a relaunch.
+   - The bottom Save is unchanged and doesn't upload the photo again.
+   - Demo: the photo is kept on the phone, as before.
+2. **Top / Upper / Center / Lower hidden.**
+   - **What they were:** `FRAMING` in `src/components/auth/Onboarding.tsx` set `focusY`, saved as `profiles.avatar_focus_y`. That moves which part of the photo shows (the image's vertical `contentPosition`) in the profile hero and the edit preview.
+   - **Why nothing showed:**
+     - The photo picker already crops the photo (always square on iPhone). Every frame that used the value is narrower than the photo, so only the sides are trimmed and moving the image up or down changes nothing.
+     - The one exception is the blurred 45% background behind the hero card, where the change can't be seen.
+   - **Fix:** the buttons are hidden in Edit profile and in onboarding's photo step. `avatar_focus_y` is kept and still applied (nothing deleted or migrated).
+3. **Who viewed my Story** — new in 0014.
+   - **Before:** a view was only marked on the viewer's own phone (`seenStoryItems`), plus an analytics event nobody can read back.
+   - **Now:**
+     - **Data:** `story_views` holds one row per Story frame per viewer, on the same per-frame model as `story_items` (a World's copy of a frame counts once).
+       - It has no access rules at all, so it can't be read or written directly, only through the functions below.
+       - Its rows are deleted with the frame or the account.
+     - **Recording:** `mark_story_viewed()` is called when a frame is actually on screen (loaded, or after the load fallback), never just because it is queued.
+       - It is idempotent.
+       - It records only live frames you may see (the same rule as reading Stories), never the author, never across a block.
+     - **Reading:** `story_viewers()` and `story_view_counts()` answer only the frame's author and leave out blocked people. Anyone else is refused by the server.
+     - **UI:** your own Story shows an eye with "Seen by N" for the frame on screen.
+       - Tapping it opens a sheet: avatar, name, @username, Follow / Following; tapping someone opens their profile. "No views yet" when there are none.
+       - The Story pauses while the sheet is open.
+       - The ••• Delete menu is unchanged, and deleting a frame deletes its views.
+   - No analytics or ranking use this data.
+
+4. **Threaded comments: ••• position.**
+   - **Cause:** the owner ••• sat in a row that stretched to the comment's full height, and its icon was centred vertically. On a long or multi-line comment it slid down into the body.
+   - **Fix:** it now sits in a fixed top-right slot, level with the name and time (`ThreadMenuSlot`, `src/components/comments/Thread.tsx`), whatever the length, depth or reply labels. Owner actions are unchanged.
+5. **Threaded comments: collapse from the thread line.**
+   - The repeated "Hide replies" text is gone.
+   - Tapping the thread line beside a reply collapses its parent's branch. Every level under it hides together; other threads stay open.
+   - The collapsed parent shows a quiet "N replies". Tapping that, or the parent's text, opens the branch again.
+   - "Reply", •••, avatar and profile taps are unaffected.
+   - It is still local UI state, and the 2-level indentation cap is unchanged. Comments still have no likes or votes.
+
+### Checks (simulated — not an iPhone)
+- **TypeScript:** clean. **`expo lint`:** clean.
+- **Web, threaded comments 19/19:**
+  - ••• top-right on short and multi-line comments, top-level, first-level and deep replies, own vs others', in both Buzz replies and the comments sheet
+  - line collapse / "N replies" / tapping the text expands
+  - deeper line collapses only its branch; the other thread stays open
+  - Reply targets the right comment
+  - no horizontal overflow
+  - Phase 9.2 suite still 69/69.
+- **Postgres 16:** 0014 suite 20/20.
+  - Covers: idempotent, per frame, author never counted, expired / hidden / blocked not recorded, author-only list and counts, no direct table access, a later block hides the viewer, deleting a frame removes its views.
+  - 0001–0014 applied twice: idempotent.
+  - Earlier suites unchanged: 0013 42, Phase 9 85, 6D 62, 7B 122, delete-world 34, messaging 113.
+- **Web:**
+  - Profile photo 17/17: library and camera Save photo, cancel, failure + retry, only the photo is saved, bottom Save still works, survives a relaunch, framing hidden in edit and onboarding.
+  - Avatar regression 15/15.
+  - Story viewers 16/16.
+
+### Needs a real iPhone
+- The "Save photo" button next to the photo at larger text sizes.
+- Camera → Save photo on device.
+- "Seen by" placement over a playing Story.
+- The viewer sheet over the Story with the home indicator.
+- A view being recorded only once the frame shows on a slow network.
+
 ## Phase 9.2 polish (no schema change, no SQL, no new package)
 
 1. **You → Your Boards opened Saved or Discover.**

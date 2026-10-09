@@ -29,6 +29,7 @@ export function Field({ label, hint, count, max, prefix, ...input }: TextInputPr
 
 // ─── Avatar picker ──────────────────────────────────────────────────────────
 
+/** The old framing presets (kept for stored values; no longer shown). */
 export const FRAMING: { label: string; y: number }[] = [
   { label: 'Top', y: 0.15 },
   { label: 'Upper', y: 0.3 },
@@ -36,7 +37,13 @@ export const FRAMING: { label: string; y: number }[] = [
   { label: 'Lower', y: 0.7 },
 ];
 
-export function AvatarPicker({ uri, focusY, onCamera, onLibrary, onFocus }: { uri?: string; focusY: number; onCamera: () => void; onLibrary: () => void; onFocus: (y: number) => void }) {
+/**
+ * Phase 9.2 follow-up: the Framing buttons (Top / Upper / Center / Lower) are no
+ * longer shown — the picker's crop already frames the photo, so they changed
+ * nothing visible. A stored `focusY` is still applied; `onFocus` is kept so
+ * callers don't change.
+ */
+export function AvatarPicker({ uri, focusY, onCamera, onLibrary }: { uri?: string; focusY: number; onCamera: () => void; onLibrary: () => void; onFocus?: (y: number) => void }) {
   return (
     <View style={{ alignItems: 'center' }}>
       <View style={styles.avatarFrame}>
@@ -46,16 +53,6 @@ export function AvatarPicker({ uri, focusY, onCamera, onLibrary, onFocus }: { ur
         <Pill label="Camera" icon={<Camera size={16} color={auth.cream} />} onPress={onCamera} />
         <Pill label="Photo Library" icon={<ImageIcon size={16} color={auth.cream} />} onPress={onLibrary} />
       </View>
-      {uri ? (
-        <View style={{ flexDirection: 'row', gap: 6, marginTop: 12, alignItems: 'center' }}>
-          <T style={{ color: auth.muted, fontSize: 13, marginRight: 4 }}>Framing</T>
-          {FRAMING.map((f) => (
-            <Tap key={f.label} onPress={() => onFocus(f.y)} style={[styles.frameChip, Math.abs(focusY - f.y) < 0.01 && styles.frameOn]} accessibilityLabel={`Framing ${f.label}`}>
-              <T style={{ color: auth.cream, fontSize: 13, fontWeight: '600' }}>{f.label}</T>
-            </Tap>
-          ))}
-        </View>
-      ) : null}
     </View>
   );
 }
@@ -140,8 +137,6 @@ const styles = StyleSheet.create({
   hint: { color: auth.muted, fontSize: 13, marginTop: 6 },
   avatarFrame: { width: 150, height: 186, borderRadius: 34, backgroundColor: auth.bg2, borderWidth: 2, borderColor: auth.line, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
   pill: { flexDirection: 'row', alignItems: 'center', height: 42, paddingHorizontal: 16, borderRadius: 21, backgroundColor: auth.navy, borderWidth: 1, borderColor: auth.line },
-  frameChip: { height: 30, paddingHorizontal: 10, borderRadius: 15, borderWidth: 1, borderColor: auth.line, justifyContent: 'center' },
-  frameOn: { backgroundColor: auth.coral, borderColor: auth.coral },
   preview: { height: 200, borderRadius: 28, overflow: 'hidden', marginHorizontal: 24 },
   previewHand: { position: 'absolute', left: 16, top: 14, right: 140, color: '#1D6BFF', fontFamily: fonts.hand, fontSize: 26, lineHeight: 28, transform: [{ rotate: '-5deg' }] },
   previewPhoto: { position: 'absolute', right: 16, top: 16, width: 110, height: 150, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.6)', overflow: 'hidden', borderWidth: 3, borderColor: '#fff' },

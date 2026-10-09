@@ -21,10 +21,12 @@ interface Props {
   action?: 'follow' | 'connect';
   /** For dark-themed boards. */
   textColor?: string;
+  /** Phase 9.2 follow-up: open the profile your own way (e.g. close a sheet first). Default: push the profile. */
+  onOpen?: () => void;
 }
 
 /** Compact person row with a follow / connect control. */
-export const PersonRow = memo(function PersonRow({ user, reason, subtitle, accent = colors.accent, action = 'follow', textColor = colors.ink }: Props) {
+export const PersonRow = memo(function PersonRow({ user, reason, subtitle, accent = colors.accent, action = 'follow', textColor = colors.ink, onOpen }: Props) {
   const following = useChimp((s) => !!s.following[user.id]);
   const toggleFollow = useChimp((s) => s.toggleFollow);
   const conn = useConnection(user.id, user.displayName);
@@ -32,7 +34,7 @@ export const PersonRow = memo(function PersonRow({ user, reason, subtitle, accen
   const label = action === 'follow' ? (on ? 'Following' : 'Follow') : conn.label;
 
   return (
-    <Tap onPress={() => router.push(`/profile/${user.id}`)} scaleTo={0.985} style={styles.row}>
+    <Tap onPress={onOpen ?? (() => router.push(`/profile/${user.id}`))} scaleTo={0.985} style={styles.row}>
       <Avatar uri={user.avatar} name={user.displayName} size={48} />
       <View style={{ flex: 1, marginLeft: 12 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>

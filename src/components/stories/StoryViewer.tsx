@@ -1,7 +1,7 @@
 import { Href, router } from 'expo-router';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { ArrowRight, MapPin, Send, X } from 'lucide-react-native';
+import { ArrowRight, Eye, MapPin, Send, X } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, StyleSheet, TextInput, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -24,6 +24,8 @@ import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { STORY_REACTIONS, StoryReplyError, sendStoryReply } from '@/services/backend/chat';
 import { removeMyStoryFrame } from '@/services/backend/ownContent';
+import { fetchStoryViewCounts, markStoryViewed } from '@/services/backend/content';
+import { StoryViewersSheet } from './StoryViewersSheet';
 import { repo } from '@/services/repository';
 import { useChat } from '@/store/useChat';
 import { uuid } from '@/utils/id';
@@ -38,7 +40,7 @@ interface Props {
   startIndex: number;
 }
 
-type PauseReason = 'hold' | 'pinch' | 'input' | 'pan' | 'menu';
+type PauseReason = 'hold' | 'pinch' | 'input' | 'pan' | 'menu' | 'viewers';
 
 /**
  * Full-screen story viewer.
@@ -54,7 +56,7 @@ export function StoryViewer({ queue: opened, startIndex }: Props) {
   const chip = Math.max(40, Math.min(48, Math.floor((width - 36 - 5 * 6) / 6)));
   const [storyIdx, setStoryIdx] = useState(startIndex);
   const [itemIdx, setItemIdx] = useState(0);
-  const [paused, setPaused] = useState<Record<PauseReason, boolean>>({ hold: false, pinch: false, input: false, pan: false, menu: false });
+  const [paused, setPaused] = useState<Record<PauseReason, boolean>>({ hold: false, pinch: false, input: false, pan: false, menu: false, viewers: false });
   // Phase 9.2: Story frames you deleted while watching leave the queue at once
   // (by frame id, so a World's copy of the same frame goes too).
   const [deleted, setDeleted] = useState<ReadonlySet<string>>(() => new Set());
@@ -219,6 +221,32 @@ export function StoryViewer({ queue: opened, startIndex }: Props) {
 
   const segments = useMemo(() => story?.items ?? [], [story]);
 
+  // Phase 9.2 follow-up (0014): a frame counts as viewed once it is actually on
+  // screen (loaded, or the load fallback passed) — not when it is merely queued.
+  // Never your own frame; the server decides the rest (idempotent per frame).
+  useEffect(() => {
+    if (!ready || !item || repo.mode() !== 'real' || repo.isMe(item.authorId)) return;
+    markStoryViewed(storyFrameId(item.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, itemKey]);
+
+  // Your own frames in this Story: "Seen by N" per frame (author-only on the server).
+  const [viewCounts, setViewCounts] = useState<Record<string, number> | null>(null);
+  const [viewersOpen, setViewersOpen] = useState(false);
+  const ownFrames = useMemo(() => (story && repo.mode() === 'real' ? story.items.filter((i) => repo.isMe(i.authorId)).map((i) => storyFrameId(i.id)) : []), [story]);
+  const ownKey = ownFrames.join(',');
+  useEffect(() => {
+    if (!ownFrames.length || viewersOpen) return;
+    let live = true;
+    fetchStoryViewCounts(ownFrames)
+      .then((c) => live && setViewCounts(c))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ownKey, viewersOpen]);
+
   if (!story || !item) return null;
 
   const chromeHidden = paused.hold || paused.pinch;
@@ -366,6 +394,23 @@ export function StoryViewer({ queue: opened, startIndex }: Props) {
                   <ArrowRight size={16} color={colors.ink} strokeWidth={2.6} style={{ marginLeft: 8 }} />
                 </Tap>
               ) : null}
+              {own && real && viewCounts ? (
+                <Tap
+                  onPress={() => {
+                    setPause('viewers', true);
+                    setViewersOpen(true);
+                  }}
+                  haptic="light"
+                  style={styles.seenBy}
+                  accessibilityLabel={`Seen by ${viewCounts[storyFrameId(item.id)] ?? 0}. See who viewed`}
+                  testID="story-seen-by"
+                >
+                  <Eye size={16} color={colors.white} />
+                  <T v="footnote" weight="700" color={colors.white} style={{ marginLeft: 6 }}>
+                    {`Seen by ${viewCounts[storyFrameId(item.id)] ?? 0}`}
+                  </T>
+                </Tap>
+              ) : null}
               {!own && author ? (
                 <>
                   <View style={styles.reactRow} testID="story-reactions">
@@ -412,6 +457,22 @@ export function StoryViewer({ queue: opened, startIndex }: Props) {
               ) : null}
             </Animated.View>
           </KeyboardAvoidingView>
+        ) : null}
+
+        {own && real ? (
+          <StoryViewersSheet
+            frameId={storyFrameId(item.id)}
+            open={viewersOpen}
+            onClose={() => {
+              setViewersOpen(false);
+              setPause('viewers', false);
+            }}
+            onOpenProfile={(id) => {
+              setViewersOpen(false);
+              setPause('viewers', false);
+              leaveTo(`/profile/${id}`);
+            }}
+          />
         ) : null}
 
         {toast ? (
@@ -472,6 +533,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.white,
   },
   replyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 12 },
+  seenBy: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginTop: 14, minHeight: 36, paddingHorizontal: 12, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.35)' },
   reactRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, columnGap: 6 },
   reactChip: { alignItems: 'center', justifyContent: 'center', overflow: 'visible', backgroundColor: 'rgba(255,255,255,0.14)' },
   replyInput: {

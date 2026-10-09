@@ -45,13 +45,17 @@ export type MediaFolder = 'avatars' | 'posts' | 'drift' | 'stories' | 'chat' | '
 /** Long-edge caps per use (px). */
 export const MAX_EDGE = { avatar: 1200, post: 1600, story: 1600, cover: 1800 } as const;
 
+/** Phase 9.2 QA: what a person sees when a photo can't be opened or processed (never the raw native text). */
+export const PHOTO_UNREADABLE = 'This photo couldn’t be opened. Try another one — or, if it’s stored in iCloud, open it in Photos first so it downloads.';
+export const PHOTO_UNPROCESSABLE = 'This photo couldn’t be prepared for upload. Try another one.';
+
 export async function pickImages(opts: { source: 'camera' | 'library'; multiple?: boolean; limit?: number; square?: boolean }): Promise<PickedImage[]> {
   if (opts.source === 'camera') {
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) throw new Error('Camera access is off. You can turn it on in Settings.');
     // Kept at high quality: this file is the only copy of the moment until it's
     // in Photos (see services/capture.ts). The upload copy is resized separately.
-    const res = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.92, allowsEditing: !!opts.square, aspect: opts.square ? [4, 5] : undefined });
+    const res = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.92, allowsEditing: !!opts.square, aspect: opts.square ? [4, 5] : undefined }).catch(unreadable);
     return res.canceled ? [] : res.assets.map((a) => ({ uri: a.uri, width: a.width, height: a.height, mimeType: a.mimeType ?? undefined, fileSize: a.fileSize ?? undefined, captured: true }));
   }
   const res = await ImagePicker.launchImageLibraryAsync({
@@ -61,27 +65,51 @@ export async function pickImages(opts: { source: 'camera' | 'library'; multiple?
     // decoded every 24–48 MP HEIC to full size and re-encoded it as a full-size
     // JPEG before Chimp resized it again — seconds per photo and a memory spike
     // that could get the app killed. prepareImage() does the one resize.
+    // Phase 9.2 QA (HEIC): with CURRENT, iOS must hand over the photo's own
+    // file type (public.heic). For some library photos it can't — e.g. iCloud
+    // "Optimize Storage" copies, edited or shared photos — and the picker fails
+    // with "Cannot load representation of type public.heic". For ONE photo
+    // (Story, profile, cover, chat) Chimp now asks for the COMPATIBLE
+    // representation: iOS transcodes HEIC/HEIF to JPEG itself when needed,
+    // out of process, at little cost for one image. Multi-photo picks
+    // (Buzz) keep CURRENT for the memory reasons above. Either way
+    // prepareImage() makes the uploaded copy a ≤1600 px JPEG, as before.
     quality: 1,
-    preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Current,
+    preferredAssetRepresentationMode: opts.multiple ? ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Current : ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
     allowsMultipleSelection: !!opts.multiple,
     selectionLimit: opts.multiple ? opts.limit ?? 6 : 1,
     allowsEditing: !opts.multiple && !!opts.square,
     aspect: opts.square ? [4, 5] : undefined,
-  });
+  }).catch(unreadable);
   return res.canceled ? [] : res.assets.map((a) => ({ uri: a.uri, width: a.width, height: a.height, mimeType: a.mimeType ?? undefined, fileSize: a.fileSize ?? undefined }));
 }
+
+/** A picker failure → one plain sentence (details only in dev logs, never in the UI). */
+function unreadable(e: unknown): never {
+  if (__DEV__) console.warn('[chimp:media] picker failed', e instanceof Error ? scrub(`${(e as { code?: string }).code ?? ''} ${e.message}`) : 'unknown');
+  throw new Error(PHOTO_UNREADABLE);
+}
+
+/** Dev-log text without file paths (never log where someone's photos live). */
+const scrub = (t: string) => t.replace(/(file|content|ph|assets-library):\/\/\S+/gi, '<file>').slice(0, 200);
 
 /** Resize so the long edge is ≤ maxEdge, re-encode as JPEG. */
 export async function prepareImage(img: PickedImage, maxEdge: number): Promise<PickedImage> {
   const long = Math.max(img.width || 0, img.height || 0);
-  const ctx = ImageManipulator.manipulate(img.uri);
-  if (long > maxEdge) {
-    if ((img.width || 0) >= (img.height || 0)) ctx.resize({ width: maxEdge });
-    else ctx.resize({ height: maxEdge });
+  // HEIC / PNG / JPEG in → one resized JPEG out (the format the media pipeline stores).
+  try {
+    const ctx = ImageManipulator.manipulate(img.uri);
+    if (long > maxEdge) {
+      if ((img.width || 0) >= (img.height || 0)) ctx.resize({ width: maxEdge });
+      else ctx.resize({ height: maxEdge });
+    }
+    const rendered = await ctx.renderAsync();
+    const out = await rendered.saveAsync({ format: SaveFormat.JPEG, compress: 0.8 });
+    return { uri: out.uri, width: out.width, height: out.height, mimeType: 'image/jpeg' };
+  } catch (e) {
+    if (__DEV__) console.warn('[chimp:media] prepare failed', e instanceof Error ? scrub(e.message) : 'unknown');
+    throw new Error(PHOTO_UNPROCESSABLE);
   }
-  const rendered = await ctx.renderAsync();
-  const out = await rendered.saveAsync({ format: SaveFormat.JPEG, compress: 0.8 });
-  return { uri: out.uri, width: out.width, height: out.height, mimeType: 'image/jpeg' };
 }
 
 // ─── Posting reliability: timeouts, idempotent paths ────────────────────────
@@ -337,6 +365,22 @@ export async function setProfilePhoto(opts: {
   await opts.link({ avatar_media_id: media.id, avatar_url: media.url });
   if (opts.previousMediaId && opts.previousMediaId !== media.id) await discardMediaById(opts.previousMediaId);
   return media;
+}
+
+/**
+ * After a failed setProfilePhoto: remove a photo that uploaded but never got
+ * linked. Only when the server confirms the profile does NOT point at it — if
+ * that can't be checked (offline), the file is left alone rather than risk
+ * removing the photo the profile now uses.
+ */
+export async function discardUnlinkedAvatar(userId: string, mediaId: string): Promise<void> {
+  try {
+    const { data, error } = await supabase().from('profiles').select('avatar_media_id').eq('id', userId).maybeSingle();
+    if (error || !data || (data as { avatar_media_id: string | null }).avatar_media_id === mediaId) return;
+    await discardMediaById(mediaId);
+  } catch {
+    /* best effort */
+  }
 }
 
 /** Convenience: prepare + upload several images (in order). */

@@ -736,6 +736,47 @@ export async function deleteStoryItem(uid: string, frameId: string): Promise<voi
   if (left?.length) throw new Error('Couldn’t delete this story. Please try again.');
 }
 
+// ─── Phase 9.2 follow-up: who viewed my Story (0014) ─────────────────────────
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const viewed = new Set<string>();
+
+/**
+ * A Story frame was shown to me. Fire-and-forget: the server records one view
+ * per person per frame (idempotent) and decides whether it counts at all
+ * (live, visible to me, not my own, no block). Quietly does nothing before
+ * 0014, offline, or for a Demo frame.
+ */
+export function markStoryViewed(frameId: string): void {
+  if (!UUID.test(frameId) || viewed.has(frameId)) return;
+  viewed.add(frameId);
+  void Promise.resolve(sb().rpc('mark_story_viewed', { p_item: frameId })).then(
+    (res) => {
+      if (res.error && !missingFunction(res.error)) viewed.delete(frameId); // try again next time it's shown
+    },
+    () => viewed.delete(frameId),
+  );
+}
+
+/** Views per frame — only for frames YOU posted (the server leaves out the rest). null: not available (before 0014). */
+export async function fetchStoryViewCounts(frameIds: string[]): Promise<Record<string, number> | null> {
+  const ids = frameIds.filter((id) => UUID.test(id));
+  if (!ids.length) return {};
+  const res = await sb().rpc('story_view_counts', { p_items: ids });
+  if (res.error) {
+    if (missingFunction(res.error)) return null;
+    throw backendError(res.error, 'Loading story views');
+  }
+  return Object.fromEntries(((res.data ?? []) as { story_item_id: string; viewers: number | string }[]).map((r) => [r.story_item_id, Number(r.viewers) || 0]));
+}
+
+/** Who viewed one of YOUR Story frames, newest first (the server refuses anyone else). */
+export async function fetchStoryViewers(frameId: string): Promise<{ userId: string; viewedAt: string }[]> {
+  const res = await sb().rpc('story_viewers', { p_item: frameId });
+  if (res.error && missingFunction(res.error)) throw new Error('Story views need the latest server update (0014).');
+  return ((said(res, 'Loading story views') as { viewer_id: string; viewed_at: string }[] | null) ?? []).map((r) => ({ userId: r.viewer_id, viewedAt: r.viewed_at }));
+}
+
 export async function editComment(id: string, body: string): Promise<CommentRow> {
   return said(await sb().rpc('edit_comment', { p_id: id, p_body: body }), 'Saving your edit') as CommentRow;
 }
