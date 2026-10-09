@@ -1,11 +1,10 @@
 import { router } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Bell, BellRing, Camera, Check, ChevronDown, ChevronLeft, Clock, Crown, Ellipsis, Lock, Play, Plus, Users } from 'lucide-react-native';
+import { Bell, BellRing, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, Clock, Ellipsis, Globe, Lock, Play, Plus, Users } from 'lucide-react-native';
 import { useState } from 'react';
 import { ActivityIndicator, Alert, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { WorldOwnerMenu } from '@/components/boards/WorldOwnerMenu';
 import { AvatarStack } from '@/components/ui/AvatarStack';
 import { IconButton } from '@/components/ui/IconButton';
 import { Img } from '@/components/ui/Img';
@@ -17,6 +16,7 @@ import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
 import { colors, shadow } from '@/theme';
 import type { Board } from '@/types/models';
+import { BOARD_ACCESS, accessOf } from '@/utils/boardVisibility';
 import { compact } from '@/utils/format';
 
 export const HERO_HEIGHT = 380;
@@ -40,9 +40,10 @@ export function BoardHero({ board, storyId }: { board: Board; storyId?: string }
   const creatorId = board.creatorId ?? board.ownerId;
   const createdBy = catalog ? 'By Chimp' : repo.isMe(creatorId) ? 'Created by you' : `Created by ${board.creatorName ?? repo.user(creatorId)?.displayName ?? 'a Chimp member'}`;
   const followers = board.followerCount ?? 0;
-  const primary = manages
-    ? { label: role === 'owner' ? 'Your World' : 'Admin', icon: 'crown' as const, onPress: () => router.push(`/board/${board.id}?tab=people`), a11y: `Manage ${board.title}` }
-    : joined
+  // Phase 9.2: no big "Your World" button for the owner / admins any more (it only
+  // looped back to this screen). They get the Board's identity line below the
+  // title, which opens Board Settings; members and visitors keep Join / Joined.
+  const primary = joined
       ? { label: 'Joined', icon: 'check' as const, onPress: () => toggleJoin(board.id), a11y: `Leave ${board.title}` }
       : requested
         ? { label: 'Requested', icon: 'clock' as const, onPress: () => toggleJoin(board.id), a11y: `Cancel your request to join ${board.title}` }
@@ -53,9 +54,8 @@ export function BoardHero({ board, storyId }: { board: Board; storyId?: string }
   // Phase 6C: the owner can replace the cover (Demo: Worlds you made on this phone).
   const createdHere = useChimp((s) => !!s.created?.boards.some((b) => b.id === board.id));
   const canEditCover = repo.isMe(board.ownerId) && (repo.mode() === 'real' || createdHere);
-  // Phase 6D (final): the owner's ••• menu (Delete World). Owner only: not admins, members or followers.
-  const isOwner = canEditCover;
-  const [menuOpen, setMenuOpen] = useState(false);
+  const access = accessOf(board);
+  const AccessIcon = access === 'private' ? Lock : access === 'connections' ? Users : Globe;
   const [coverBusy, setCoverBusy] = useState(false);
   const changeCover = async () => {
     try {
@@ -72,7 +72,6 @@ export function BoardHero({ board, storyId }: { board: Board; storyId?: string }
 
   return (
     <View style={{ height: HERO_HEIGHT + insets.top }}>
-      {isOwner ? <WorldOwnerMenu board={board} open={menuOpen} onClose={() => setMenuOpen(false)} /> : null}
       <Img uri={board.hero} style={StyleSheet.absoluteFill} tint="#E9D9DC" />
       <LinearGradient
         colors={['rgba(0,0,0,0.28)', 'rgba(0,0,0,0)', 'rgba(0,0,0,0.05)', 'rgba(0,0,0,0.55)']}
@@ -90,7 +89,8 @@ export function BoardHero({ board, storyId }: { board: Board; storyId?: string }
               {coverBusy ? <ActivityIndicator color={colors.ink} /> : <Camera size={21} color={colors.ink} strokeWidth={2.3} />}
             </IconButton>
           ) : null}
-          <IconButton label={isOwner ? 'World options' : 'More'} variant="glass" size={46} onPress={isOwner ? () => setMenuOpen(true) : () => router.push('/settings')}>
+          {/* Phase 9.2: ••• is this Board's settings (was: the app's global Settings). */}
+          <IconButton label="Board settings" variant="glass" size={46} onPress={() => router.push(`/board-settings/${board.id}`)}>
             <Ellipsis size={22} color={colors.ink} strokeWidth={2.4} />
           </IconButton>
         </View>
@@ -103,14 +103,22 @@ export function BoardHero({ board, storyId }: { board: Board; storyId?: string }
         <T v="callout" color={colors.white} weight="500" style={[styles.shadow, { marginTop: 2, fontSize: 16 }]}>
           {board.tagline}
         </T>
-        {board.visibility === 'private' || board.visibility === 'connections' ? (
-          <View style={styles.access} accessibilityLabel={board.visibility === 'private' ? 'Private World' : 'Visible to connections'}>
-            {board.visibility === 'private' ? <Lock size={11} color={colors.white} /> : <Users size={11} color={colors.white} />}
-            <T v="caption" color={colors.white} weight="700" style={{ marginLeft: 4 }}>
-              {board.visibility === 'private' ? 'Private' : 'Connections'}
-            </T>
-          </View>
-        ) : null}
+        {/* Phase 9.2: what kind of Board this is. Owner / admins: opens Board Settings. */}
+        <Tap
+          onPress={manages ? () => router.push(`/board-settings/${board.id}`) : undefined}
+          disabled={!manages}
+          scaleTo={manages ? 0.96 : 1}
+          style={styles.access}
+          accessibilityLabel={manages ? `${BOARD_ACCESS[access].label}${role === 'owner' ? ', you own it' : ', you’re an admin'}. Board settings` : BOARD_ACCESS[access].label}
+          accessibilityRole={manages ? 'button' : 'text'}
+          testID="board-visibility"
+        >
+          <AccessIcon size={11} color={colors.white} />
+          <T v="caption" color={colors.white} weight="700" style={{ marginLeft: 4 }}>
+            {`${BOARD_ACCESS[access].label}${role === 'owner' ? ' · Yours' : role === 'admin' ? ' · Admin' : ''}`}
+          </T>
+          {manages ? <ChevronRight size={12} color={colors.white} style={{ marginLeft: 2 }} /> : null}
+        </Tap>
 
         {/* Who's here, and the honest numbers (members ≠ followers). */}
         <View style={styles.row}>
@@ -131,6 +139,7 @@ export function BoardHero({ board, storyId }: { board: Board; storyId?: string }
         </View>
 
         {/* Phase 6D: Follow = see its activity; Join = be a member. Members don't need to follow. */}
+        {manages ? null : (
         <View style={[styles.row, { gap: 10 }]}>
           {!joined ? (
             <Tap
@@ -150,24 +159,23 @@ export function BoardHero({ board, storyId }: { board: Board; storyId?: string }
             onPress={primary.onPress}
             haptic="medium"
             accessibilityLabel={primary.a11y}
-            style={[styles.join, on || manages ? { backgroundColor: board.theme.primarySoft } : { backgroundColor: board.theme.primary }, shadow.md]}
+            style={[styles.join, on ? { backgroundColor: board.theme.primarySoft } : { backgroundColor: board.theme.primary }, shadow.md]}
             testID="world-join"
           >
-            {primary.icon === 'crown' ? (
-              <Crown size={18} color={board.theme.primary} strokeWidth={2.6} />
-            ) : primary.icon === 'check' ? (
+            {primary.icon === 'check' ? (
               <Check size={20} color={board.theme.primary} strokeWidth={3} />
             ) : primary.icon === 'clock' ? (
               <Clock size={18} color={board.theme.primary} strokeWidth={2.6} />
             ) : (
               <Plus size={20} color={board.theme.onPrimary} strokeWidth={3} />
             )}
-            <T v="bodyStrong" color={on || manages ? board.theme.primary : board.theme.onPrimary} style={{ marginHorizontal: 8, fontSize: 17 }} numberOfLines={1}>
+            <T v="bodyStrong" color={on ? board.theme.primary : board.theme.onPrimary} style={{ marginHorizontal: 8, fontSize: 17 }} numberOfLines={1}>
               {primary.label}
             </T>
-            {joined && !manages ? <ChevronDown size={18} color={board.theme.primary} strokeWidth={2.6} /> : null}
+            {joined ? <ChevronDown size={18} color={board.theme.primary} strokeWidth={2.6} /> : null}
           </Tap>
         </View>
+        )}
       </View>
     </View>
   );
@@ -179,7 +187,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', marginTop: 14 },
   join: { flex: 1.3, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 50, paddingHorizontal: 14, borderRadius: 25 },
   follow: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 50, paddingHorizontal: 12, borderRadius: 25, backgroundColor: 'rgba(255,255,255,0.2)', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.6)' },
-  access: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginTop: 8, height: 22, paddingHorizontal: 8, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.35)' },
+  access: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginTop: 8, minHeight: 24, paddingHorizontal: 9, borderRadius: 12, backgroundColor: 'rgba(0,0,0,0.35)' },
   story: {
     marginLeft: 8,
     flexDirection: 'row',

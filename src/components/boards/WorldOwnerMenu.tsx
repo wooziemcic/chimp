@@ -14,13 +14,16 @@ import type { Board } from '@/types/models';
 
 /**
  * Phase 6D (final): the ••• menu on a World YOU OWN. Delete World (after a
- * confirmation) and the usual Settings. Only the owner ever sees it (admins,
- * members and followers keep the plain ••• → Settings), and the server checks
- * ownership again before anything is deleted.
+ * confirmation) and Board settings. Only the owner ever sees it, and the
+ * server checks ownership again before anything is deleted.
+ * Phase 9.2: Board Settings opens it straight at the confirmation
+ * (`confirmOnly`); "Settings" now means this Board's settings, never the
+ * app's global Settings.
  */
-export function WorldOwnerMenu({ board, open, onClose }: { board: Board; open: boolean; onClose: () => void }) {
+export function WorldOwnerMenu({ board, open, onClose, confirmOnly }: { board: Board; open: boolean; onClose: () => void; confirmOnly?: boolean }) {
   const insets = useDeviceInsets(); // Phase 8: a Modal sheet covers the whole phone → its real insets
-  const [confirm, setConfirm] = useState(false);
+  const [asked, setConfirm] = useState(false);
+  const confirm = asked || !!confirmOnly;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const close = () => {
@@ -70,14 +73,14 @@ export function WorldOwnerMenu({ board, open, onClose }: { board: Board; open: b
               <Tap
                 onPress={() => {
                   close();
-                  router.push('/settings');
+                  router.push(`/board-settings/${board.id}`);
                 }}
                 style={styles.row}
-                accessibilityLabel="Settings"
+                accessibilityLabel="Board settings"
               >
                 <Settings size={19} color={colors.ink} />
                 <T v="bodyStrong" style={{ marginLeft: 14 }}>
-                  Settings
+                  Board settings
                 </T>
               </Tap>
               <Tap onPress={close} style={[styles.row, styles.cancel]} accessibilityLabel="Cancel">

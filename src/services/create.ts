@@ -14,7 +14,7 @@ import { CATALOG_BY_ID } from '@/data/worldCatalog';
 import { getBoardTheme } from '@/theme/boardThemes';
 import type { Board, BuzzItem, DriftItem, Story } from '@/types/models';
 import { createUserBoard } from './boardFactory';
-import { type NewBuzz, createBuzz, createDrift, createStoryItem, createWorld, removeOldCover, setWorldCover } from './backend/content';
+import { type NewBuzz, createBuzz, createDrift, createStoryItem, createWorld, removeOldCover, setWorldCover, updateWorld } from './backend/content';
 import { toBoard } from './backend/mappers';
 import { MAX_EDGE, type MediaFolder, type PickedImage, type PickedVideo, type UploadedMedia, type UploadedVideo, type UploadProgress, discardMedia, prepareImage, removeTempFile, uploadImage, uploadVideo } from './backend/media';
 import * as realData from './backend/realData';
@@ -290,6 +290,55 @@ export async function makeWorld(d: WorldDraft): Promise<Board> {
   if (!useChimp.getState().joined[board.id]) useChimp.setState({ joined: { ...useChimp.getState().joined, [board.id]: true } });
   useChimp.getState().track('create', { kind: 'board', id: board.id });
   return board;
+}
+
+/**
+ * Phase 9.2 (Board Settings): the owner edits their World later — name,
+ * description, what it's about (category + its look) and who can see it.
+ * REAL: the row is updated with your session (RLS: owner only); the server's
+ * answer is what's shown. DEMO: Worlds you made on this phone.
+ */
+export interface WorldEdit {
+  title?: string;
+  tagline?: string;
+  /** A WORLD_CATALOG id (sets category + theme, like New World). */
+  kindOf?: string;
+  visibility?: 'public' | 'connections' | 'private';
+}
+
+export async function editWorld(board: Board, edit: WorldEdit): Promise<void> {
+  if (!repo.isMe(board.ownerId)) throw new Error('Only the person who made this World can change it.');
+  const title = edit.title?.trim();
+  if (title !== undefined && (title.length < 2 || title.length > 60)) throw new Error('A name needs 2 to 60 characters.');
+  const cat = edit.kindOf ? CATALOG_BY_ID[edit.kindOf] : undefined;
+  if (isRealMode()) {
+    const row = await updateWorld(board.id, {
+      ...(title !== undefined ? { title } : {}),
+      ...(edit.tagline !== undefined ? { tagline: edit.tagline.trim() || null } : {}),
+      ...(cat ? { category: cat.category, theme_id: cat.themeId } : {}),
+      ...(edit.visibility ? { visibility: edit.visibility } : {}),
+    });
+    // The server's row is the truth (what you asked for, if a field didn't come back).
+    const v = row.visibility ?? edit.visibility ?? board.visibility;
+    const themeId = row.theme_id ?? cat?.themeId ?? board.themeId;
+    realData.updateBoard(board.id, {
+      title: row.title ?? title ?? board.title,
+      tagline: row.tagline !== undefined ? row.tagline ?? '' : edit.tagline !== undefined ? edit.tagline.trim() : board.tagline,
+      category: (row.category ?? cat?.category ?? board.category) as Board['category'],
+      themeId,
+      theme: getBoardTheme(themeId),
+      visibility: v === 'private' || v === 'connections' ? v : 'public',
+      type: row.type ?? board.type,
+    });
+    return;
+  }
+  if (!useChimp.getState().created?.boards.some((b) => b.id === board.id)) throw new Error('In the Demo you can change Worlds you made on this phone.');
+  useChimp.getState().updateCreatedBoard(board.id, {
+    ...(title !== undefined ? { title } : {}),
+    ...(edit.tagline !== undefined ? { tagline: edit.tagline.trim() } : {}),
+    ...(cat ? { category: cat.category, themeId: cat.themeId, theme: getBoardTheme(cat.themeId) } : {}),
+    ...(edit.visibility ? { visibility: edit.visibility, type: edit.visibility === 'private' ? 'private' : 'user_created' } : {}),
+  });
 }
 
 /**

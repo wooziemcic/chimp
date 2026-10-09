@@ -97,6 +97,8 @@ export interface CommentRow {
   created_at: string;
   /** Phase 6D (0004). */
   edited_at?: string | null;
+  /** Phase 9.2 (0013): the comment this replies to. */
+  parent_id?: string | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -271,5 +273,5 @@ export function toStories(rows: StoryRow[], media: Record<string, string>, board
 
 /** A `comments` row on a Buzz → a reply (exact time kept for "Just now" / "5m" / "Yesterday"). */
 export function toReply(c: CommentRow): BuzzReply {
-  return { id: c.id, buzzId: c.target_id, authorId: c.author_id, body: c.body, createdAt: c.created_at, createdAtMs: Date.parse(c.created_at), editedAtMs: c.edited_at ? Date.parse(c.edited_at) : undefined };
+  return { id: c.id, buzzId: c.target_id, authorId: c.author_id, body: c.body, createdAt: c.created_at, createdAtMs: Date.parse(c.created_at), editedAtMs: c.edited_at ? Date.parse(c.edited_at) : undefined, parentId: c.parent_id ?? undefined };
 }

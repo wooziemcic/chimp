@@ -31,6 +31,7 @@ import { fetchRelationships, subscribeUserEvents, type UserEventRow } from '@/se
 import * as realData from '@/services/backend/realData';
 import { repo } from '@/services/repository';
 import { useAfterDark } from '@/store/useAfterDark';
+import { useArchives } from '@/store/useArchives';
 import { usePins } from '@/store/usePins';
 import { ACTIVITY_KINDS, isSocialKind, useSocialInbox } from '@/store/useSocialInbox';
 import { relationshipWrites, useChimp } from '@/store/useChimp';
@@ -260,6 +261,7 @@ function refreshWorldSoon() {
 /** Build 5 patch 2: load the in-app social list and the people it names. */
 async function loadInbox(me: string): Promise<void> {
   void usePins.getState().load(me, true); // Phase 9: pinned Worlds (foreground / reconnect re-read)
+  void useArchives.getState().load(me, true); // Phase 9.2: archived Boards
   await useSocialInbox.getState().load(me);
   if (uid !== me) return;
   await ensurePeople(useSocialInbox.getState().items.map((i) => i.actor_id));
@@ -314,5 +316,8 @@ export function stopLive(): void {
   again = false;
   useLive.setState({ status: 'off', syncedAt: 0, vibeHint: false });
   useSocialInbox.getState().reset();
-  usePins.getState().reset();
+  // A REAL account's pins / archive go with it (they're re-read on the next start).
+  // The Demo's live on this phone and are never touched here (live never runs for it).
+  if (usePins.getState().owner !== 'demo') usePins.getState().reset();
+  if (useArchives.getState().owner !== 'demo') useArchives.getState().reset();
 }

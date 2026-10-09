@@ -7,6 +7,7 @@ import { FlatList, Share, StyleSheet, useWindowDimensions, View, ViewToken } fro
 
 import { duration } from '@/components/drift/DriftTile';
 import { ChimpVideo } from '@/components/media/ChimpVideo';
+import { PhotoCarousel } from '@/components/media/PhotoCarousel';
 import { Avatar } from '@/components/ui/Avatar';
 import { Img } from '@/components/ui/Img';
 import { Button, EmptyState } from '@/components/ui/misc';
@@ -102,13 +103,23 @@ function DriftPage({ item, width, height, active }: { item: DriftItem; width: nu
   const myComments = useChimp((s) => s.comments[`drift:${item.id}`]?.length ?? 0);
   const board = repo.board(item.boardId);
   const author = repo.user(item.authorId);
+  const ownLikes = repo.mode() === 'real' && repo.isMe(item.authorId);
 
   return (
     <View style={{ width, height }}>
       {item.clipSource ? (
         <ChimpVideo uri={item.clipSource} poster={item.image} active={active} muted={muted} onToggleMute={() => setMuted((m) => !m)} contentFit="cover" style={StyleSheet.absoluteFill} muteStyle={{ top: fullscreenTop(insets) + MIN_TAP + 4, right: 14 }} />
-      ) : (
+      ) : item.images && item.images.length > 1 ? (
+        // A World photo post with several photos: every photo, swiped sideways (the shared
+        // carousel), each shown whole on black — the opened viewer never crops.
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: '#000' }]}>
+          <PhotoCarousel images={item.images} width={width} height={height} contentFit="contain" tint="#000" dotsBottom={height - fullscreenTop(insets) - MIN_TAP - 22} testID="drift-photos" />
+        </View>
+      ) : item.kind === 'video' ? (
         <Img uri={item.image} tint="#111" style={StyleSheet.absoluteFill} />
+      ) : (
+        // One photo: shown whole too (cards elsewhere may crop; the viewer doesn't).
+        <Img uri={item.image} tint="#000" contentFit="contain" style={StyleSheet.absoluteFill} testID="drift-photo" />
       )}
       <LinearGradient pointerEvents="none" colors={['rgba(0,0,0,0.45)', 'rgba(0,0,0,0)', 'rgba(0,0,0,0)', 'rgba(0,0,0,0.8)']} locations={[0, 0.2, 0.55, 1]} style={StyleSheet.absoluteFill} />
 
@@ -140,12 +151,26 @@ function DriftPage({ item, width, height, active }: { item: DriftItem; width: nu
       </View>
 
       <View style={[styles.actions, { bottom: insets.bottom + 150 }]}>
-        <Tap onPress={() => toggleLike(item.id)} haptic="light" accessibilityLabel={liked ? 'Unlike' : 'Like'} style={styles.action}>
-          <Heart size={28} color={liked ? '#FF3D6E' : colors.white} fill={liked ? '#FF3D6E' : 'transparent'} />
-          <T v="caption" color={colors.white} weight="700">
-            {compact(item.likeCount + (liked ? 1 : 0))}
-          </T>
-        </Tap>
+        {ownLikes ? (
+          // Phase 9.2: your own post — the heart likes, the count shows who liked it.
+          <View style={styles.action}>
+            <Tap onPress={() => toggleLike(item.id)} haptic="light" accessibilityLabel={liked ? 'Unlike' : 'Like'}>
+              <Heart size={28} color={liked ? '#FF3D6E' : colors.white} fill={liked ? '#FF3D6E' : 'transparent'} />
+            </Tap>
+            <Tap onPress={() => router.push(`/likes/drift:${item.id}`)} accessibilityLabel={`${compact(item.likeCount + (liked ? 1 : 0))} likes. See who liked this`} testID="likes-count" style={{ minWidth: 44, alignItems: 'center' }}>
+              <T v="caption" color={colors.white} weight="700">
+                {compact(item.likeCount + (liked ? 1 : 0))}
+              </T>
+            </Tap>
+          </View>
+        ) : (
+          <Tap onPress={() => toggleLike(item.id)} haptic="light" accessibilityLabel={liked ? 'Unlike' : 'Like'} style={styles.action}>
+            <Heart size={28} color={liked ? '#FF3D6E' : colors.white} fill={liked ? '#FF3D6E' : 'transparent'} />
+            <T v="caption" color={colors.white} weight="700">
+              {compact(item.likeCount + (liked ? 1 : 0))}
+            </T>
+          </Tap>
+        )}
         <Tap onPress={() => router.push(`/comments/drift:${item.id}`)} haptic="light" accessibilityLabel="Comments" style={styles.action}>
           <MessageCircle size={26} color={colors.white} />
           <T v="caption" color={colors.white} weight="700">
@@ -166,7 +191,7 @@ function DriftPage({ item, width, height, active }: { item: DriftItem; width: nu
         </Tap>
       </View>
 
-      <View style={[styles.bottom, { paddingBottom: insets.bottom + 18 }]}>
+      <View style={[styles.bottom, { paddingBottom: insets.bottom + 18 }]} pointerEvents="box-none">
         <Tap onPress={() => router.push(`/profile/${item.authorId}`)} style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Avatar uri={author?.avatar} name={author?.displayName} size={34} ring={colors.white} ringWidth={1.5} />
           <T v="bodyStrong" color={colors.white} style={{ marginLeft: 8 }}>

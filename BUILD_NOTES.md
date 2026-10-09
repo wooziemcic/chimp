@@ -1,6 +1,142 @@
-# Chimp build notes — v0.9 — Phase 9: Social intelligence + engagement loop
+# Chimp build notes — v0.9 — Phase 9: Social intelligence + engagement loop (+ 9.1, 9.2)
 
 Branch `phase-9`. Not merged, not built, not submitted. Everything below was tested on a local Postgres 16, in Node against the real app modules, and in a Chromium web build against Supabase mocks — **not on an iPhone**. The two-iPhone checklist below is still to do.
+
+## Phase 9.2 polish (no schema change, no SQL, no new package)
+
+1. **You → Your Boards opened Saved or Discover.**
+   - Cause: it went to `/boards` with no parameter. The Boards tab stays mounted, so it kept whichever segment you last picked.
+   - Fix: it now passes `segment=joined` the same way Saved Boards passes `segment=saved` (`src/app/(tabs)/you.tsx`). Going to Boards from the bottom bar still keeps your last segment.
+2. **Buzz action row spread out.**
+   - Cause: the 9.2 likers change split the heart and count on your own posts into two buttons, and gave the count a minimum width and padding. That pushed reply and repost to the right.
+   - Fix: the row is back to the original spacing. Your own post's row lines up exactly with anyone else's, and the touch areas come from an invisible hit area (`BuzzCard.tsx`).
+3. **Repost hidden.**
+   - Reposts are not shown anywhere: no feed, profile or "reposted by" line shows them.
+   - In real accounts the count is always 0.
+   - Tapping it only fed your own ranking signals.
+   - The button is removed from the Buzz card and nothing is left in its place. The store, analytics, ranking and server code for reposts are unchanged.
+4. **The opened World photo viewer cropped photos.**
+   - Cause: `src/app/drift/[id].tsx` used the shared `PhotoCarousel` with its default "cover" fit.
+   - Fix: it now uses the carousel's existing `contentFit="contain"` on black. Every photo shows whole and still swipes sideways; a single photo shows whole too.
+   - Feed and Board cards still fill their frame. The Buzz carousel is unchanged.
+5. **Delete your own Story.**
+   - In the Story viewer, the ••• next to the close button appears only on your own Story. It reuses the existing `OwnerMenu`: Delete story, then a confirmation (Keep it / Delete story). The Story pauses while the menu is open.
+   - **Real accounts:** the frame is deleted on the server under the existing author-only rule. The app then checks the row is really gone and reports an error if not.
+   - After that the frame leaves your Story and any World's Story at once, followed by a background reload.
+   - **Demo:** frames you posted on this phone are removed locally.
+   - The viewer moves to your next frame, or to the next Story, or closes.
+   - Replies already sent to you about it stay in Messages. The photo file stays in storage: no new SQL was allowed, and the existing clean-up only runs when a World is deleted.
+
+## Phase 9.2 — Boards organisation, Board settings, private lists, likers, threaded comments
+
+Built on `phase-9` at `9d4bf73`. Not committed, not built, not submitted. Map is not part of this.
+
+### What you must do once
+1. **SQL:** in the Supabase SQL Editor, run `supabase/migrations/0013_phase9_boards.sql` once.
+   - It checks that 0012 is applied first.
+   - It is additive and idempotent, so running it twice is safe.
+   - Do **not** re-run 0001–0012.
+2. **Release order:** apply 0013 together with (or after) the new app build.
+   - 0013 makes follower/following lists private.
+   - An *older* build counts other people's followers by reading the rows, so on someone else's profile it would show 0–1 once 0013 is on.
+   - The new build reads the totals from `follow_counts()`, and falls back to the old count before 0013.
+3. Nothing else: no new Edge Function, no new secret, no new native module, no new package.
+
+### What changed
+1. **Multi-photo World posts (bug).**
+   - Cause: a World photo post opens `src/app/drift/[id].tsx`. That screen showed the "6 photos" pill but drew only `item.image` (the first photo). Board post cards (`PhotoPost` in `PostModules.tsx`) also used only `images[0]`.
+   - Fix: the Buzz carousel moved, unchanged, into `src/components/media/PhotoCarousel.tsx`.
+     - Buzz (`BuzzCard` MediaCard), the World post viewer and Board photo posts now use that one renderer.
+     - 1 photo = the photo; several = swipe sideways with dots. In feeds and Boards a tap opens the same full-screen viewer.
+   - The Board Today cover shows "N photos" instead of a play button for multi-photo posts.
+2. **Board visibility.**
+   - Private / Connections / Public was already a real column (`boards.visibility`, 0004); every existing Board keeps its value.
+   - Old `members` data reads as Private (`src/utils/boardVisibility.ts`).
+   - The owner changes it later in Board Settings. The update goes through the existing owner-only RLS policy `boards update` (0001), and `type` follows private ↔ user_created.
+   - Making a Board *wider* (Private → Connections → Public) asks first, because everything already posted becomes visible to more people. Narrowing applies at once.
+   - 0013 adds a guard: an owner can't change `type` to anything other than user_created / private.
+3. **Board Settings** — `src/app/board-settings/[id].tsx`. The Board's ••• now opens this (it used to open the app's global Settings).
+   - **Board:** name, description, category (the New World chips) and cover (owner only).
+   - **Visibility:** the three kinds; read-only for everyone except the owner.
+   - **Members:** Manage members / Invite people, which open the Board's People tab where the existing add / approve / roles live.
+   - **Permissions:** shown as they are today, read-only. Custom per-Board permissions don't exist in the data model, so none were invented.
+     - Posting, photos and Story follow who can see the Board (RLS `can_see_board`).
+     - Invite / approve: owner and admins.
+   - **Organization:** Pin / Unpin and Archive / Unarchive.
+   - **Danger zone:** Leave (members and admins), Delete (owner, the existing confirmed `delete_world` flow).
+4. **"Your World" removed.**
+   - It routed to the same Board's People tab, the loop you saw.
+   - Under the title there is now a compact chip: "Private Board", "Connections Board" or "Public Board" (plus "· Yours" / "· Admin").
+   - Owner / admin: tapping it opens Board Settings. Everyone else: read-only.
+   - Members and visitors keep Join / Joined / Follow as before.
+5. **Pinned Boards.**
+   - They now sit at the top of the Boards tab, newest pin at the far left (`pinned_at` desc; horizontal row).
+   - They're stored as before (`board_pins` / `set_board_pin`, 0012).
+   - The Pinned section is gone from Happening. Pins still feed the "Happening now" ranking as before.
+   - Pin / unpin: long-press any Board, or Board Settings.
+6. **Covers / Timeline.**
+   - A small switch at the top-right of the Board list, remembered on the phone (`useBoardsView`).
+   - Covers is the grid as before. Timeline uses the *same* Board objects (`src/graph/boardTimeline.ts`), grouped into:
+     - **Today / This Week / Later:** the next Move (plan) linked to the Board, or the newest Buzz/Drift posted in it.
+     - **Memories:** nothing new for a week, or only past plans.
+     - **Anytime:** a Chimp World with no dates.
+   - Boards you made fall back to their creation date.
+7. **Boards search.**
+   - Boards' search button opens `/search?scope=boards`, which searches Boards only and never people (`src/graph/boardSearch.ts`).
+   - Result order:
+     1. Your Boards (made or joined)
+     2. Exact title matches
+     3. Looser matches among yours and saved ones
+     4. Boards made by your connections
+     5. Other visible Boards
+   - Results are shown as "Your Boards" then "Other Boards". Rows show the cover, title, description, and whose · kind · members.
+   - Buzz / Happening search is unchanged.
+8. **Archive** (per person, new in 0013: `board_archives`, own-only RLS).
+   - Archiving takes a Board out of Joined (and out of your pins). It stays one tap away under "Archived" at the bottom.
+   - It never changes the Board, its members or who can see it.
+9. **You: private lists.**
+   - Tapping Followers / Following / Connections on your own profile opens `src/app/relations.tsx`, which reuses `PersonRow`. The screen only ever shows the signed-in account's own lists.
+   - On other profiles the totals are not tappable.
+   - 0013 narrows `follows` reads to rows you're in. Before, any signed-in user could read anyone's followers/following.
+   - Totals come from `follow_counts()`.
+10. **Who liked my post.**
+    - On your own posts (Buzz card and the World post viewer) the like *count* opens `src/app/likes/[target].tsx`. The heart still likes.
+    - Each row shows the avatar, name, @username and Follow / Following, and tapping opens the profile.
+    - Server: `post_likers()` (0013) returns ids + time to the post's author only, never across a block.
+11. **Threaded comments.**
+    - Data: `comments.parent_id` (0013). A reply must be on the same post as its parent, can't be moved, and outlives a deleted parent (it becomes top-level).
+    - Where: Buzz replies (`src/app/buzz/[id].tsx`) and the comments sheet (`src/app/comments/[postId].tsx`).
+    - Each comment has **Reply** (the composer says "Replying to …") and **Hide replies / View N replies**.
+    - Indentation stops at 2 levels; deeper replies say "↳ name".
+    - Comments have no likes, votes or reactions.
+12. **Small fix found while testing:** the Demo's pins were cleared whenever the live layer stopped (it never runs for the Demo). They now stay. A REAL account's pins and archive are still cleared on sign-out.
+
+### Checks (simulated — not an iPhone)
+- **TypeScript:** clean. **`expo lint`:** clean. **`expo export`:** web and iOS bundles build.
+- **Postgres 16:** 0013 suite 42/42 (threads, likers, private follows, archives, visibility and type guard).
+  - 0001–0013 applied twice: idempotent.
+  - Earlier suites unchanged: 6D 62, 7B 122, 7C 96, Phase 9 85, delete-world 34, messaging 113, Build 5 18.
+- **Node:** Phase 9.2 46/46. Phase 9.1 12, Phase 9 93 (+7 video), o10 96, p8 52, m7 38, c7client 24, push7 33, t7 14, a7 90, scenario6 — all passed.
+- **Web, Phase 9.2:** 69/69, REAL + Demo.
+  - Photos: 1 / 2 / 6 photos, plus Buzz unchanged.
+  - Board Settings: owner vs member, widening confirm.
+  - Pins: order, kept after a relaunch, not in Happening.
+  - Search: Boards only, sections, order.
+  - Timeline: groups, remembered after a relaunch.
+  - Archive.
+  - Lists: own lists open; someone else's don't.
+  - Likers.
+  - Threads: reply to the correct parent, collapse / expand, no comment-like controls.
+- **Web regressions:** Phase 9.1 11, Phase 9 49, feeds 44, receipts 23, chat 38, groups 80, navigation 31 + 13, App Review Demo 31, delete World 34, 6D 72, layout 88, 6C smoke 33, 6C 66/67, cycle completed with 0 page errors, Demo sweep 0 errors.
+  - 6C A4 also fails on the 9.1 baseline.
+- Five older web tests were updated for the intended changes (copies of the originals kept): Happening no longer has a Pinned section; Board deletion is reached through Board Settings; the owner sees the Board's kind instead of "Your World".
+
+### Needs a real iPhone
+- Swiping a multi-photo World post sideways inside the full-screen viewer that you swipe up and down.
+- The Board chip under the title at large text sizes.
+- The Covers / Timeline switch and the pinned row.
+- Keyboard + Reply bar in comments.
+- Board Settings' Save with the keyboard open.
 
 ## Phase 9.1 — quick fixes (no migration, no schema change, no feed logic change)
 

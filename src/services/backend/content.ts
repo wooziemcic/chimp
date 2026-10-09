@@ -30,10 +30,17 @@ import { DB_TIMEOUT_MS, type UploadedMedia, type UploadedVideo, UploadStalledErr
 const sb = () => supabase();
 
 /**
- * Build 5 patch: someone's Followers / Following totals (REAL). Follows are
- * public (0001 "follows read"), so these are plain counts; null if unavailable.
+ * Build 5 patch: someone's Followers / Following totals (REAL); null if unavailable.
+ * Phase 9.2: the lists are private (0013: you can only read follows you're in),
+ * so the totals come from follow_counts(); before 0013, plain counts.
  */
 export async function fetchFollowCounts(userId: string): Promise<{ followers: number; following: number } | null> {
+  const rpc = await sb().rpc('follow_counts', { p_user: userId });
+  if (!rpc.error) {
+    const row = (Array.isArray(rpc.data) ? rpc.data[0] : rpc.data) as { followers: number | string; following: number | string } | null;
+    return row ? { followers: Number(row.followers) || 0, following: Number(row.following) || 0 } : { followers: 0, following: 0 };
+  }
+  if (!missingFunction(rpc.error)) return null;
   const [a, b] = await Promise.all([
     sb().from('follows').select('follower_id', { count: 'exact', head: true }).eq('followee_id', userId),
     sb().from('follows').select('followee_id', { count: 'exact', head: true }).eq('follower_id', userId),
@@ -586,8 +593,12 @@ export const sync = {
     if (optionId) must(await sb().from('poll_votes').upsert({ buzz_id: buzzId, user_id: uid, option_id: optionId }, { onConflict: 'buzz_id,user_id' }), 'Voting');
     else must(await sb().from('poll_votes').delete().match({ buzz_id: buzzId, user_id: uid }), 'Removing vote');
   },
-  async comment(uid: string, targetKind: 'buzz' | 'drift' | 'post' | 'story', targetId: string, body: string): Promise<CommentRow> {
-    return must(await sb().from('comments').insert({ author_id: uid, target_kind: targetKind, target_id: targetId, body: body.trim() }).select('*').single(), 'Posting reply') as CommentRow;
+  /** Phase 9.2: `parentId` makes it a reply to that comment (0013; same post only, checked by the server). */
+  async comment(uid: string, targetKind: 'buzz' | 'drift' | 'post' | 'story', targetId: string, body: string, parentId?: string): Promise<CommentRow> {
+    const row = { author_id: uid, target_kind: targetKind, target_id: targetId, body: body.trim(), ...(parentId ? { parent_id: parentId } : {}) };
+    const res = await sb().from('comments').insert(row).select('*').single();
+    if (res.error && parentId && /parent_id/.test(res.error.message ?? '')) throw new Error('Replies to comments need the latest server update (0013).');
+    return must(res, 'Posting reply') as CommentRow;
   },
   /**
    * Phase 7C: an explicit, idempotent intent (set_crush, 0009): a repeat tap
@@ -630,6 +641,59 @@ export async function fetchComments(targetKind: CommentTarget, targetId: string)
   return must(await sb().from('comments').select('*').eq('target_kind', targetKind).eq('target_id', targetId).order('created_at'), 'Loading comments') as CommentRow[];
 }
 
+// ─── Phase 9.2: private lists, likers, archived Boards, Board details ────────
+
+/** Your own Followers / Following (ids, newest first). Only ever your own: RLS (0013) allows nothing else. */
+export async function fetchMyFollowLists(uid: string): Promise<{ followers: string[]; following: string[] }> {
+  const [a, b] = await Promise.all([
+    sb().from('follows').select('follower_id,created_at').eq('followee_id', uid).order('created_at', { ascending: false }).limit(1000),
+    sb().from('follows').select('followee_id,created_at').eq('follower_id', uid).order('created_at', { ascending: false }).limit(1000),
+  ]);
+  const followers = (must(a, 'Loading followers') as { follower_id: string }[]).map((r) => r.follower_id);
+  const following = (must(b, 'Loading following') as { followee_id: string }[]).map((r) => r.followee_id);
+  return { followers, following };
+}
+
+/** Who liked one of YOUR posts (0013 post_likers; the server refuses anyone else). */
+export async function fetchLikers(kind: 'buzz' | 'drift', id: string): Promise<{ userId: string; likedAt: string }[]> {
+  const res = await sb().rpc('post_likers', { p_kind: kind, p_id: id });
+  if (res.error && missingFunction(res.error)) throw new Error('Seeing who liked a post needs the latest server update (0013).');
+  return ((must(res, 'Loading likes') as { user_id: string; liked_at: string }[] | null) ?? []).map((r) => ({ userId: r.user_id, likedAt: r.liked_at }));
+}
+
+/** Your archived Boards; null when this server can't store them yet (0013 not applied). Other failures throw. */
+export async function fetchMyArchives(uid: string): Promise<{ board_id: string; archived_at: string }[] | null> {
+  const res = await sb().from('board_archives').select('board_id,archived_at').eq('user_id', uid);
+  if (res.error && (res.error.code === '42P01' || res.error.code === 'PGRST205' || /board_archives/.test(res.error.message ?? ''))) return null;
+  return must(res, 'Loading archived Boards') as { board_id: string; archived_at: string }[];
+}
+
+export async function setBoardArchive(uid: string, boardId: string, on: boolean): Promise<void> {
+  if (on) must(await sb().from('board_archives').upsert({ user_id: uid, board_id: boardId }, { onConflict: 'user_id,board_id', ignoreDuplicates: true }), 'Archiving');
+  else must(await sb().from('board_archives').delete().match({ user_id: uid, board_id: boardId }), 'Unarchiving');
+}
+
+export interface WorldDetails {
+  title?: string;
+  tagline?: string | null;
+  category?: string;
+  theme_id?: string;
+  visibility?: 'public' | 'connections' | 'private';
+}
+
+/**
+ * The owner edits their World (name, description, category, who can see it).
+ * RLS "boards update" (0001) lets only the owner change the row; zero rows
+ * back means it wasn't yours (or isn't there any more).
+ */
+export async function updateWorld(boardId: string, patch: WorldDetails): Promise<BoardRow> {
+  const row: Record<string, unknown> = { ...patch };
+  if (patch.visibility) row.type = patch.visibility === 'private' ? 'private' : 'user_created';
+  const rows = must(await sb().from('boards').update(row).eq('id', boardId).in('type', ['user_created', 'private']).select('*'), 'Saving your World') as BoardRow[];
+  if (!rows.length) throw new Error('Only the person who made this World can change it.');
+  return rows[0];
+}
+
 /** Names + avatars for people who aren't in the loaded world yet (e.g. commenters). */
 export async function fetchPeople(ids: string[]): Promise<ProfileRow[]> {
   const out: ProfileRow[] = [];
@@ -660,6 +724,16 @@ export async function editBuzz(id: string, body: string, boardId: string): Promi
 export async function deleteBuzz(id: string): Promise<void> {
   const paths = (said(await sb().rpc('delete_buzz', { p_id: id }), 'Deleting post') as string[] | null) ?? [];
   if (paths.length) await sb().storage.from('media').remove(paths).catch(() => undefined);
+}
+
+/**
+ * Phase 9.2: delete one of your Story frames (RLS "stories delete", 0001: author
+ * only). Checked afterwards: if the row is still there, it wasn't deleted.
+ */
+export async function deleteStoryItem(uid: string, frameId: string): Promise<void> {
+  said(await sb().from('story_items').delete().eq('id', frameId).eq('author_id', uid), 'Deleting story');
+  const left = said(await sb().from('story_items').select('id').eq('id', frameId), 'Deleting story') as { id: string }[] | null;
+  if (left?.length) throw new Error('Couldn’t delete this story. Please try again.');
 }
 
 export async function editComment(id: string, body: string): Promise<CommentRow> {

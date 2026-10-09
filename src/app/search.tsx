@@ -1,4 +1,4 @@
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { Search as SearchIcon, X } from 'lucide-react-native';
 import { useEffect, useMemo, useState } from 'react';
 import { KeyboardAvoidingView, Platform, SectionList, StyleSheet, TextInput, View } from 'react-native';
@@ -12,11 +12,15 @@ import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { openWorldActions } from '@/components/worlds/WorldActionSheet';
 import { interestById } from '@/data/interests';
+import { searchBoards } from '@/graph/boardSearch';
+import { isAfterDarkBoard } from '@/graph/surfaces';
 import { type PersonHit, searchPeople } from '@/services/backend/people';
 import { repo } from '@/services/repository';
+import { useChimp } from '@/store/useChimp';
 import { colors, radius } from '@/theme';
 import type { Href } from 'expo-router';
-import type { ImageSrc } from '@/types/models';
+import type { Board, ImageSrc } from '@/types/models';
+import { BOARD_ACCESS, accessOf } from '@/utils/boardVisibility';
 import { compact } from '@/utils/format';
 
 interface Row {
@@ -28,6 +32,8 @@ interface Row {
   href: Href;
   /** Phase 9: a World (long-press → Pin / Unpin). */
   boardId?: string;
+  /** Phase 9.2: a second, quieter line (Boards search: whose · kind · members). */
+  meta?: string;
 }
 
 const SUGGESTIONS = ['Tokyo', 'co-founder', 'rooftop', 'photography', 'Lisbon', 'ramen'];
@@ -50,13 +56,43 @@ function matches(q: string, ...fields: (string | undefined)[]) {
  * before they show up anywhere in your world.
  */
 export default function SearchScreen() {
+  // Phase 9.2: `/search?scope=boards` (the search button on Boards) searches Boards only.
+  const { scope } = useLocalSearchParams<{ scope?: string }>();
+  const boardsOnly = scope === 'boards';
   const insets = useSafeAreaInsets();
   const [q, setQ] = useState('');
   const query = q.trim().toLowerCase();
-  const remote = useRemotePeople(query);
+  const remote = useRemotePeople(boardsOnly ? '' : query);
+  const joined = useChimp((s) => s.joined);
+  const saved = useChimp((s) => s.savedBoards);
+  const connected = useChimp((s) => s.connections);
+
+  const suggestions = boardsOnly
+    ? [...new Set(repo.boards().filter((b) => (repo.isMe(b.ownerId) || !!joined[b.id]) && !isAfterDarkBoard(b)).map((b) => b.title))].slice(0, 6)
+    : SUGGESTIONS;
 
   const sections = useMemo(() => {
     if (!query) return [];
+    if (boardsOnly) {
+      const found = searchBoards(
+        repo.boards().filter((b) => !isAfterDarkBoard(b)),
+        query,
+        { isMine: (b) => repo.isMe(b.ownerId) || !!joined[b.id] || !!b.roles?.[repo.meId()], saved, connected, interestLabel: (i) => interestById[i]?.label },
+      );
+      const row = (b: Board, other: boolean): Row => ({
+        key: b.id,
+        title: b.title,
+        subtitle: b.tagline || BOARD_ACCESS[accessOf(b)].label,
+        meta: [other ? worldOwnerLine(b.ownerId) : repo.isMe(b.ownerId) ? 'Yours' : joined[b.id] ? 'Joined' : 'Saved', BOARD_ACCESS[accessOf(b)].label, `${compact(b.memberCount)} ${b.memberCount === 1 ? 'member' : 'members'}`].join(' · '),
+        image: b.cover,
+        href: `/board/${b.id}`,
+        boardId: b.id,
+      });
+      return [
+        { title: 'Your Boards', data: found.yours.map((b) => row(b, false)) },
+        { title: 'Other Boards', data: found.others.map((b) => row(b, true)) },
+      ].filter((s) => s.data.length);
+    }
     const people: Row[] = repo
       .people()
       .filter((u) => matches(query, u.displayName, u.username, u.city, u.bio, ...u.interests.map((i) => interestById[i]?.label), ...(u.knownFor ?? [])))
@@ -83,7 +119,7 @@ export default function SearchScreen() {
       { title: 'Worlds', data: boards },
       { title: 'Moves', data: moves },
     ].filter((s) => s.data.length);
-  }, [query, remote]);
+  }, [query, remote, boardsOnly, joined, saved, connected]);
 
   const go = (href: Href) => {
     router.back();
@@ -100,7 +136,7 @@ export default function SearchScreen() {
             autoFocus
             value={q}
             onChangeText={setQ}
-            placeholder="Search people, @usernames or Worlds"
+            placeholder={boardsOnly ? 'Search Boards' : 'Search people, @usernames or Worlds'}
             placeholderTextColor={colors.inkFaint}
             returnKeyType="search"
             autoCorrect={false}
@@ -121,7 +157,7 @@ export default function SearchScreen() {
             TRY
           </T>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-            {SUGGESTIONS.map((s) => (
+            {suggestions.map((s) => (
               <InterestChip key={s} label={s} onPress={() => setQ(s)} />
             ))}
           </View>
@@ -155,10 +191,15 @@ export default function SearchScreen() {
                 <T v="footnote" color={colors.inkMuted} numberOfLines={1}>
                   {item.subtitle}
                 </T>
+                {item.meta ? (
+                  <T v="caption" color={colors.inkFaint} weight="500" numberOfLines={1} style={{ marginTop: 1 }}>
+                    {item.meta}
+                  </T>
+                ) : null}
               </View>
             </Tap>
           )}
-          ListEmptyComponent={<EmptyState icon={<X size={22} color={colors.accent} />} title="No matches yet" body={`Nothing in your graph matches “${q}”.`} />}
+          ListEmptyComponent={<EmptyState icon={<X size={22} color={colors.accent} />} title="No matches yet" body={boardsOnly ? `No Board you can see matches “${q}”.` : `Nothing in your graph matches “${q}”.`} />}
         />
       )}
     </KeyboardAvoidingView>

@@ -1,10 +1,11 @@
 import { LinearGradient } from 'expo-linear-gradient';
-import { ArrowRight, BadgeCheck, Bookmark, Heart, Link2, MessageCircle, Newspaper, Repeat2, ThumbsDown } from 'lucide-react-native';
+import { ArrowRight, BadgeCheck, Bookmark, Heart, Link2, MessageCircle, Newspaper, ThumbsDown } from 'lucide-react-native';
 import { router } from 'expo-router';
-import { memo, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { memo } from 'react';
+import { StyleSheet, View } from 'react-native';
 
 import { VideoPoster } from '@/components/media/ChimpVideo';
+import { PhotoCarousel } from '@/components/media/PhotoCarousel';
 import { Avatar } from '@/components/ui/Avatar';
 import { CategoryIcon } from '@/components/ui/CategoryIcon';
 import { Img } from '@/components/ui/Img';
@@ -38,7 +39,9 @@ interface Props {
  *     sits under it as its own editorial line (legacy "meme" text included).
  *   - Tapping media opens the one global viewer (a modal, not a route).
  *   - No touchable is nested inside another (clean on web, predictable on iOS).
- * Like / reply / repost / save; dislike is private and collapses the card with an Undo.
+ * Like / reply / save; dislike is private and collapses the card with an Undo.
+ * (Repost is kept in the data and store but not shown: nothing in the app
+ * surfaces reposts yet — Phase 9.2 polish.)
  */
 export const BuzzCard = memo(function BuzzCard({ item, width, expanded }: Props) {
   useImpression(expanded ? null : `buzz:${item.id}`);
@@ -208,21 +211,36 @@ function Byline({ item, expanded }: { item: BuzzItem; expanded?: boolean }) {
 function Actions({ item, compactRow }: { item: BuzzItem; compactRow?: boolean }) {
   const liked = useChimp((s) => !!s.buzzLikes[item.id]);
   const saved = useChimp((s) => !!s.buzzSaves[item.id]);
-  const reposted = useChimp((s) => !!s.buzzReposts[item.id]);
   const replies = useReplyCount(item);
   const toggleLike = useChimp((s) => s.toggleBuzzLike);
   const toggleDislike = useChimp((s) => s.toggleBuzzDislike);
   const toggleSave = useChimp((s) => s.toggleBuzzSave);
-  const toggleRepost = useChimp((s) => s.toggleBuzzRepost);
   const size = compactRow ? 17 : 19;
+  const likes = compact(item.likeCount + (liked ? 1 : 0));
+  // Phase 9.2: on your own REAL post the count opens who liked it (the heart still likes).
+  const ownLikes = repo.mode() === 'real' && !!item.authorId && repo.isMe(item.authorId);
   return (
     <View style={styles.actions}>
-      <Tap onPress={() => toggleLike(item.id)} haptic="light" style={[styles.act, compactRow && styles.actTight]} accessibilityLabel={liked ? 'Unlike' : 'Like'}>
-        <Heart size={size} color={liked ? '#FF3D6E' : colors.ink2} fill={liked ? '#FF3D6E' : 'transparent'} />
-        <T v="footnote" color={colors.inkMuted} weight="500" style={styles.count}>
-          {compact(item.likeCount + (liked ? 1 : 0))}
-        </T>
-      </Tap>
+      {ownLikes ? (
+        // Same footprint as the plain like button: the count just becomes its own target.
+        <View style={[styles.act, compactRow && styles.actTight]}>
+          <Tap onPress={() => toggleLike(item.id)} haptic="light" style={styles.likeIcon} hitSlop={{ top: 10, bottom: 10, left: 6, right: 2 }} accessibilityLabel={liked ? 'Unlike' : 'Like'}>
+            <Heart size={size} color={liked ? '#FF3D6E' : colors.ink2} fill={liked ? '#FF3D6E' : 'transparent'} />
+          </Tap>
+          <Tap onPress={() => pushOnce(`/likes/buzz:${item.id}`)} style={styles.likeCount} hitSlop={{ top: 10, bottom: 10, left: 2, right: 8 }} accessibilityLabel={`${likes} likes. See who liked this`} testID="likes-count">
+            <T v="footnote" color={colors.inkMuted} weight="500" style={styles.count}>
+              {likes}
+            </T>
+          </Tap>
+        </View>
+      ) : (
+        <Tap onPress={() => toggleLike(item.id)} haptic="light" style={[styles.act, compactRow && styles.actTight]} accessibilityLabel={liked ? 'Unlike' : 'Like'}>
+          <Heart size={size} color={liked ? '#FF3D6E' : colors.ink2} fill={liked ? '#FF3D6E' : 'transparent'} />
+          <T v="footnote" color={colors.inkMuted} weight="500" style={styles.count}>
+            {likes}
+          </T>
+        </Tap>
+      )}
       <Tap onPress={() => pushOnce(`/buzz/${item.id}`)} style={[styles.act, compactRow && styles.actTight]} accessibilityLabel={`${replies} replies`}>
         <MessageCircle size={size} color={colors.ink2} />
         {!compactRow || replies ? (
@@ -231,14 +249,6 @@ function Actions({ item, compactRow }: { item: BuzzItem; compactRow?: boolean })
           </T>
         ) : null}
       </Tap>
-      {!compactRow ? (
-        <Tap onPress={() => toggleRepost(item.id)} haptic="light" style={styles.act} accessibilityLabel={reposted ? 'Undo repost' : 'Repost'}>
-          <Repeat2 size={size} color={reposted ? colors.success : colors.ink2} />
-          <T v="footnote" color={reposted ? colors.success : colors.inkMuted} weight="500" style={styles.count}>
-            {compact(item.repostCount + (reposted ? 1 : 0))}
-          </T>
-        </Tap>
-      ) : null}
       <View style={{ flex: 1 }} />
       <Tap onPress={() => toggleDislike(item.id)} haptic="light" style={[styles.icon, compactRow && styles.iconTight]} accessibilityLabel="Dislike: show me less like this">
         <ThumbsDown size={size - 1} color={colors.inkFaint} />
@@ -315,7 +325,6 @@ function TextCard({ item, width, onPress, expanded }: { item: BuzzItem; width: n
 function MediaCard({ item, width, onPress, expanded }: { item: BuzzItem; width: number; onPress?: () => void; expanded?: boolean }) {
   const imgs = imagesOf(item);
   const caption = captionOf(item);
-  const [page, setPage] = useState(0);
   const half = width < 240;
   const h = Math.round(width / clampAspect(item.imageAspects?.[0]));
   const view = (i: number) => openMedia(imgs, item.imageAspects, i, viewerMeta(item));
@@ -323,32 +332,7 @@ function MediaCard({ item, width, onPress, expanded }: { item: BuzzItem; width: 
   const bold = caption.length > 0 && caption.length <= 90;
   return (
     <View style={[styles.cardFlat, { width }]} testID="buzz-card">
-      {imgs.length > 1 ? (
-        <View>
-          <ScrollView
-            horizontal
-            pagingEnabled
-            showsHorizontalScrollIndicator={false}
-            onMomentumScrollEnd={(e) => setPage(Math.round(e.nativeEvent.contentOffset.x / width))}
-            scrollEventThrottle={32}
-          >
-            {imgs.map((u, i) => (
-              <Tap key={`${u}${i}`} onPress={() => view(i)} scaleTo={1} accessibilityLabel={`Photo ${i + 1} of ${imgs.length}`}>
-                <Img uri={u} style={{ width, height: h }} />
-              </Tap>
-            ))}
-          </ScrollView>
-          <View style={styles.dots} pointerEvents="none">
-            {imgs.map((u, i) => (
-              <View key={`d${i}`} style={[styles.dot, i === page && styles.dotOn]} />
-            ))}
-          </View>
-        </View>
-      ) : (
-        <Tap onPress={() => view(0)} scaleTo={0.995} accessibilityLabel="Open photo">
-          <Img uri={imgs[0]} style={{ width, height: h }} />
-        </Tap>
-      )}
+      <PhotoCarousel images={imgs} width={width} height={h} onOpen={view} />
       <View style={{ paddingHorizontal: 14, paddingTop: 12, paddingBottom: 4 }}>
         {caption ? (
           <Tap onPress={onPress} disabled={!onPress} scaleTo={0.99} accessibilityLabel={caption}>
@@ -526,13 +510,12 @@ const styles = StyleSheet.create({
   iconTight: { width: 32 },
   actTight: { paddingHorizontal: 4, marginRight: 0 },
   count: { marginLeft: 4 },
+  likeIcon: { minHeight: 40, justifyContent: 'center' },
+  likeCount: { minHeight: 40, justifyContent: 'center' },
   opt: { height: 40, borderRadius: 12, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', overflow: 'hidden' },
   optFill: { position: 'absolute', left: 0, top: 0, bottom: 0, backgroundColor: colors.accentSoft },
   caption: { fontSize: 22, lineHeight: 26, fontWeight: '800', letterSpacing: -0.4, color: colors.ink },
   captionHalf: { fontSize: 17, lineHeight: 21 },
-  dots: { position: 'absolute', bottom: 10, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 5 },
-  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.55)' },
-  dotOn: { backgroundColor: colors.white, width: 16 },
   newsTile: { borderRadius: radius.xl, overflow: 'hidden', backgroundColor: colors.bgSoft },
   newsThumb: { width: 92, height: 92, borderRadius: 16 },
   update: { flexDirection: 'row', alignItems: 'center', height: 24, paddingHorizontal: 8, borderRadius: 12, backgroundColor: colors.accent },

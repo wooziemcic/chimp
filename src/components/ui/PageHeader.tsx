@@ -1,4 +1,4 @@
-import { router } from 'expo-router';
+import { type Href, router } from 'expo-router';
 import { Bell, Search } from 'lucide-react-native';
 import { ReactNode } from 'react';
 import { View } from 'react-native';
@@ -27,13 +27,15 @@ interface Props {
   compact?: boolean;
   /** Subtitle colour override (After Dark's muted ink). */
   subtitleColor?: string;
+  /** Phase 9.2: where Search goes (Boards: Boards-only search). Default: the app search. */
+  searchHref?: Href;
 }
 
 /**
  * The header every primary tab shares (Phase 7C: built from `layout`, so
  * normal Chimp and After Dark have the same gutter, top spacing and gaps).
  */
-export function PageHeader({ title, eyebrow = 'Chimp', subtitle, dark, right, badge, showActions = true, compact, subtitleColor }: Props) {
+export function PageHeader({ title, eyebrow = 'Chimp', subtitle, dark, right, badge, showActions = true, compact, subtitleColor, searchHref = '/search' }: Props) {
   // World Delta + (Build 5 patch 2) new follows / connection events.
   const unseen = useUnseenChanges().length + useSocialInbox(selectUnseenSocial);
   const ink = dark ? colors.white : colors.ink;
@@ -56,7 +58,7 @@ export function PageHeader({ title, eyebrow = 'Chimp', subtitle, dark, right, ba
         {right}
         {showActions ? (
           <View style={{ flexDirection: 'row', gap: 12, marginBottom: compact ? 0 : 2, marginLeft: right ? 12 : 0 }}>
-            <IconButton label="Search" variant={dark ? 'dark' : 'light'} onPress={() => router.push('/search')}>
+            <IconButton label="Search" variant={dark ? 'dark' : 'light'} onPress={() => router.push(searchHref)}>
               <Search size={22} color={ink} strokeWidth={2.2} />
             </IconButton>
             <IconButton

@@ -15,6 +15,8 @@ import type { User } from '@/types/models';
 interface Props {
   user: User;
   reason?: string;
+  /** Phase 9.2: a plain second line instead of city / reason (e.g. "@maya · liked 2h ago"). */
+  subtitle?: string;
   accent?: string;
   action?: 'follow' | 'connect';
   /** For dark-themed boards. */
@@ -22,7 +24,7 @@ interface Props {
 }
 
 /** Compact person row with a follow / connect control. */
-export const PersonRow = memo(function PersonRow({ user, reason, accent = colors.accent, action = 'follow', textColor = colors.ink }: Props) {
+export const PersonRow = memo(function PersonRow({ user, reason, subtitle, accent = colors.accent, action = 'follow', textColor = colors.ink }: Props) {
   const following = useChimp((s) => !!s.following[user.id]);
   const toggleFollow = useChimp((s) => s.toggleFollow);
   const conn = useConnection(user.id, user.displayName);
@@ -39,7 +41,11 @@ export const PersonRow = memo(function PersonRow({ user, reason, accent = colors
           </T>
           {user.verified ? <BadgeCheck size={15} color={colors.white} fill={colors.accent} style={{ marginLeft: 4 }} /> : null}
         </View>
-        {reason ? (
+        {subtitle !== undefined ? (
+          <T v="footnote" color={colors.inkMuted} numberOfLines={1} style={{ marginTop: 1 }}>
+            {subtitle}
+          </T>
+        ) : reason ? (
           <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
             <Sparkles size={12} color={accent} />
             <T v="footnote" color={accent} weight="500" numberOfLines={1} style={{ marginLeft: 4, flexShrink: 1 }}>

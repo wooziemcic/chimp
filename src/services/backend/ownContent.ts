@@ -13,7 +13,7 @@ import { repo } from '@/services/repository';
 import { usePins } from '@/store/usePins';
 import { useChimp } from '@/store/useChimp';
 import { useSession } from '@/store/useSession';
-import { deleteBuzz, deleteComment, deleteWorld, editBuzz, editComment } from './content';
+import { deleteBuzz, deleteComment, deleteStoryItem, deleteWorld, editBuzz, editComment } from './content';
 import type { CommentRow } from './mappers';
 import * as realData from './realData';
 
@@ -77,6 +77,31 @@ export async function saveReplyEdit(id: string, body: string): Promise<CommentRo
 export async function removeMyReply(id: string): Promise<void> {
   await deleteComment(id);
   realData.removeReply(id);
+}
+
+// ─── Phase 9.2: delete a Story you posted ───────────────────────────────────
+
+/**
+ * REAL: the server deletes the frame (author only), then it leaves your Story
+ * and any World's Story at once; a background reload keeps the cache in step.
+ * DEMO: Story frames you posted on this phone, removed locally.
+ * (A reply someone already sent you about it stays in Messages.)
+ */
+export async function removeMyStoryFrame(frameId: string): Promise<void> {
+  if (repo.mode() === 'real') {
+    const uid = realData.real.uid();
+    if (!uid) throw new Error('You’re signed out.');
+    await deleteStoryItem(uid, frameId);
+    realData.removeStoryFrame(frameId);
+    resync();
+    return;
+  }
+  const created = useChimp.getState().created;
+  const stories = (created?.stories ?? [])
+    .map((s) => ({ ...s, items: s.items.filter((i) => i.id !== frameId) }))
+    .filter((s) => s.items.length)
+    .map((s) => ({ ...s, cover: s.items[s.items.length - 1].image }));
+  useChimp.setState({ created: { ...created, stories } });
 }
 
 // ─── Phase 6D (final): delete a World you own ───────────────────────────────

@@ -9,14 +9,17 @@ import { T } from '@/components/ui/Text';
 import { colors, radius } from '@/theme';
 
 interface Props {
-  /** 'post' or 'reply': used in the wording. */
-  what: 'post' | 'reply';
+  /** 'post', 'reply' or (Phase 9.2) 'story': used in the wording. */
+  what: 'post' | 'reply' | 'story';
   /** When it was posted (the 1-hour edit window starts here). */
   createdAtMs?: number;
   /** Some things can never be edited (e.g. polls). */
   editable?: boolean;
-  onEdit: () => void;
+  /** Omitted: no Edit row (e.g. a Story can only be deleted). */
+  onEdit?: () => void;
   onDelete: () => Promise<void>;
+  /** Phase 9.2: told when the menu opens / closes (the Story viewer pauses meanwhile). */
+  onOpenChange?: (open: boolean) => void;
   /** Light icon for dark surfaces. */
   onDark?: boolean;
   size?: number;
@@ -27,7 +30,7 @@ interface Props {
  * Delete (any time, after a confirmation). The server has the final say on
  * both; this only offers what it will allow.
  */
-export function OwnerMenu({ what, createdAtMs, editable = true, onEdit, onDelete, onDark, size = 18 }: Props) {
+export function OwnerMenu({ what, createdAtMs, editable = true, onEdit, onDelete, onOpenChange, onDark, size = 18 }: Props) {
   const insets = useDeviceInsets(); // Phase 8: a Modal sheet covers the whole phone → its real insets
   const [open, setOpen] = useState(false);
   const [editMinutes, setEditMinutes] = useState(0);
@@ -39,9 +42,10 @@ export function OwnerMenu({ what, createdAtMs, editable = true, onEdit, onDelete
     setOpen(false);
     setConfirm(false);
     setError(null);
+    onOpenChange?.(false);
   };
   const canEdit = editable && editMinutes > 0;
-  const noun = what === 'post' ? 'post' : 'reply';
+  const noun = what;
 
   const del = async () => {
     setBusy(true);
@@ -51,6 +55,7 @@ export function OwnerMenu({ what, createdAtMs, editable = true, onEdit, onDelete
       setBusy(false);
       setOpen(false);
       setConfirm(false);
+      onOpenChange?.(false);
     } catch (e) {
       setBusy(false);
       setError(e instanceof Error ? e.message : String(e));
@@ -63,6 +68,7 @@ export function OwnerMenu({ what, createdAtMs, editable = true, onEdit, onDelete
         onPress={() => {
           setEditMinutes(editMinutesLeft(createdAtMs));
           setOpen(true);
+          onOpenChange?.(true);
         }}
         hitSlop={8} style={styles.trigger} accessibilityLabel={`Options for your ${noun}`} testID={`owner-menu-${what}`}>
         <MoreHorizontal size={size} color={onDark ? colors.white : colors.inkMuted} />
@@ -72,6 +78,7 @@ export function OwnerMenu({ what, createdAtMs, editable = true, onEdit, onDelete
           <Pressable style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 16) }]} onPress={() => undefined}>
             {!confirm ? (
               <>
+                {onEdit ? (
                 <Tap onPress={() => { if (canEdit) { close(); onEdit(); } }} disabled={!canEdit} style={[styles.row, !canEdit && { opacity: 0.5 }]} accessibilityLabel={`Edit ${noun}`} testID="owner-edit">
                   <Pencil size={19} color={colors.ink} />
                   <View style={{ flex: 1, marginLeft: 14 }}>
@@ -85,6 +92,7 @@ export function OwnerMenu({ what, createdAtMs, editable = true, onEdit, onDelete
                     </T>
                   </View>
                 </Tap>
+                ) : null}
                 <Tap onPress={() => setConfirm(true)} style={styles.row} accessibilityLabel={`Delete ${noun}`} testID="owner-delete">
                   <Trash2 size={19} color={colors.danger} />
                   <T v="bodyStrong" color={colors.danger} style={{ marginLeft: 14 }}>
@@ -103,7 +111,9 @@ export function OwnerMenu({ what, createdAtMs, editable = true, onEdit, onDelete
                 <T v="subhead" color={colors.inkMuted} weight="400" style={{ marginTop: 6 }}>
                   {what === 'post'
                     ? 'It’s removed everywhere: Buzz, Worlds, your profile, Drift and anyone’s saves. Its replies and likes go too. This can’t be undone.'
-                    : 'It’s removed for everyone. This can’t be undone.'}
+                    : what === 'story'
+                      ? 'It’s removed from your Story and from any World it was shared to, for everyone. Replies already sent to you stay in Messages. This can’t be undone.'
+                      : 'It’s removed for everyone. This can’t be undone.'}
                 </T>
                 {error ? (
                   <T v="footnote" color={colors.danger} style={{ marginTop: 10 }} testID="owner-error">

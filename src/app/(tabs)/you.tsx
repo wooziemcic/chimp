@@ -157,9 +157,10 @@ export default function YouScreen() {
           <Lately labels={hot.slice(0, 3).map((i) => interestById[i]?.label ?? i)} />
           <StatsRow
             stats={[
-              { value: compact(followerCount), label: 'Followers' },
-              { value: compact(followingCount), label: 'Following' },
-              { value: compact(connectionCount), label: 'Connections', onPress: () => router.push('/people?view=connections') },
+              // Phase 9.2: your own lists open here — private to you (others' profiles show totals only).
+              { value: compact(followerCount), label: 'Followers', onPress: () => pushOnce('/relations?list=followers') },
+              { value: compact(followingCount), label: 'Following', onPress: () => pushOnce('/relations?list=following') },
+              { value: compact(connectionCount), label: 'Connections', onPress: () => pushOnce('/relations?list=connections') },
               { value: `${matchCount}`, label: 'Matches', onPress: () => router.push('/people') },
             ]}
           />
@@ -200,7 +201,7 @@ export default function YouScreen() {
             empty="Nothing saved yet."
           />
           {mine.length || real ? (
-            <BoardStackCard title="Your Boards" boards={mine} countLabel={(b) => `${b.memberCount} ${b.memberCount === 1 ? 'member' : 'members'} · ${postsLabel(repo.boardPostCount(b.id))}`} onSeeAll={() => router.navigate('/boards')} empty="You haven’t joined a World yet." />
+            <BoardStackCard title="Your Boards" boards={mine} countLabel={(b) => `${b.memberCount} ${b.memberCount === 1 ? 'member' : 'members'} · ${postsLabel(repo.boardPostCount(b.id))}`} onSeeAll={() => router.navigate({ pathname: '/boards', params: { segment: 'joined', at: String(Date.now()) } })} empty="You haven’t joined a World yet." />
           ) : null}
         </View>
 

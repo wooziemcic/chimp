@@ -48,6 +48,8 @@ export function WorldActionSheet() {
     setBusy(true);
     setError(null);
     try {
+      // (Demo: make sure this phone's pins are the ones being changed.)
+      if (repo.mode() !== 'real' && usePins.getState().owner !== 'demo') await usePins.getState().load('demo', false);
       await usePins.getState().toggle(board.id, repo.mode() === 'real');
       setBusy(false);
       useWorldSheet.setState({ boardId: null });
@@ -78,7 +80,7 @@ export function WorldActionSheet() {
               <View style={{ flex: 1, marginLeft: 14 }}>
                 <T v="bodyStrong">{pinned ? 'Unpin World' : 'Pin World'}</T>
                 <T v="footnote" color={colors.inkMuted} weight="400">
-                  {pinned ? 'It leaves the top of Happening.' : 'Keeps it at the top of Happening. Pinning doesn’t change who can see it.'}
+                  {pinned ? 'It leaves the top of your Boards.' : 'Keeps it at the top of your Boards. Pinning doesn’t change who can see it.'}
                 </T>
               </View>
             </Tap>

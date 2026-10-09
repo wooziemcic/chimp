@@ -222,6 +222,8 @@ export default function RootLayout() {
           <Stack.Screen name="after-dark/challenge/[id]" options={{ contentStyle: { backgroundColor: '#07060A' } }} />
           <Stack.Screen name="after-dark/card" options={{ contentStyle: { backgroundColor: '#07060A' } }} />
           <Stack.Screen name="people" />
+          <Stack.Screen name="relations" />
+          <Stack.Screen name="board-settings/[id]" />
           <Stack.Screen name="agent" />
           <Stack.Screen name="loops" />
           <Stack.Screen name="settings" />
@@ -242,6 +244,7 @@ export default function RootLayout() {
           <Stack.Screen name="search" options={{ presentation: 'modal' }} />
           <Stack.Screen name="delta" options={{ presentation: 'modal' }} />
           <Stack.Screen name="comments/[postId]" options={{ presentation: 'modal' }} />
+          <Stack.Screen name="likes/[target]" options={{ presentation: 'modal' }} />
           <Stack.Screen name="age-gate" options={{ presentation: 'transparentModal', animation: 'fade' }} />
           <Stack.Screen name="edit-profile" options={{ presentation: 'modal' }} />
           <Stack.Screen name="new-chat" options={{ presentation: 'modal' }} />

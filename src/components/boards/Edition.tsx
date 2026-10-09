@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
-import { ArrowRight, Flame, Lightbulb, Newspaper, Play, Sparkles, TrendingUp } from 'lucide-react-native';
+import { ArrowRight, Flame, GalleryHorizontal, Lightbulb, Newspaper, Play, Sparkles, TrendingUp } from 'lucide-react-native';
 import { memo, useState } from 'react';
 import { FlatList, StyleSheet, useWindowDimensions, View } from 'react-native';
 import Animated, { FadeIn } from 'react-native-reanimated';
@@ -192,6 +192,7 @@ function Cover({ lead, theme }: { lead: LeadItem; theme: BoardTheme }) {
   const { width } = useWindowDimensions();
   const w = width - 32;
   const image = lead.kind === 'news' ? lead.item.image : lead.kind === 'drift' ? lead.item.image : lead.item.images?.[0] ?? lead.item.place?.image;
+  const photoCount = lead.kind === 'news' ? 0 : (lead.item.images?.length ?? 0);
   const kicker = lead.kind === 'news' ? 'COVER · NEWS' : lead.kind === 'drift' ? `COVER · WATCH${lead.item.durationSec ? ` · ${duration(lead.item.durationSec)}` : ''}` : 'COVER · FROM THE WORLD';
   const title = lead.kind === 'news' ? lead.item.news?.headline : lead.kind === 'drift' ? lead.item.caption : lead.item.title ?? lead.item.body;
   const sub =
@@ -204,7 +205,15 @@ function Cover({ lead, theme }: { lead: LeadItem; theme: BoardTheme }) {
     <Tap onPress={() => router.push(leadHref(lead) as never)} scaleTo={0.985} style={[styles.cover, shadow.md, { width: w, height: w * 1.05 }]} accessibilityLabel={`Cover: ${title}`}>
       <Img uri={image} style={StyleSheet.absoluteFill} />
       <LinearGradient colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.25)', 'rgba(0,0,0,0.78)']} locations={[0.3, 0.55, 1]} style={StyleSheet.absoluteFill} />
-      {lead.kind === 'drift' ? (
+      {photoCount > 1 ? (
+        // Several photos: say so (they all open from here), never a play button.
+        <View style={styles.photoCount} testID="cover-photo-count">
+          <GalleryHorizontal size={13} color={colors.white} />
+          <T v="caption" color={colors.white} weight="700" style={{ marginLeft: 4 }}>
+            {`${photoCount} photos`}
+          </T>
+        </View>
+      ) : lead.kind === 'drift' ? (
         <View style={styles.play}>
           <Play size={22} color={colors.white} fill={colors.white} />
         </View>
@@ -525,6 +534,7 @@ const styles = StyleSheet.create({
   topicRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 },
   topic: { height: 28, paddingHorizontal: 11, borderRadius: 14, borderWidth: 1, justifyContent: 'center' },
   cover: { alignSelf: 'center', borderRadius: radius.xl, overflow: 'hidden', backgroundColor: colors.bgSoft },
+  photoCount: { position: 'absolute', top: 16, right: 16, flexDirection: 'row', alignItems: 'center', height: 28, paddingHorizontal: 10, borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.45)' },
   play: { position: 'absolute', top: 16, right: 16, width: 48, height: 48, borderRadius: 24, backgroundColor: 'rgba(0,0,0,0.35)', alignItems: 'center', justifyContent: 'center' },
   whyPill: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginTop: 10, height: 24, paddingHorizontal: 9, borderRadius: 12, maxWidth: '100%' },
   module: { marginTop: 26 },

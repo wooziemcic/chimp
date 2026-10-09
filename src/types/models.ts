@@ -312,6 +312,8 @@ export interface Comment {
   editedAt?: ISODate;
   /** Phase 6B optimistic state: sending, or failed (with Retry). */
   status?: 'sending' | 'failed';
+  /** Phase 9.2: the comment this one replies to (none = top-level). */
+  parentId?: ID;
 }
 
 export interface Tip {
@@ -772,6 +774,8 @@ export interface BuzzReply {
   editedAtMs?: number;
   /** Phase 6B optimistic state: sending, or failed (with Retry). */
   status?: 'sending' | 'failed';
+  /** Phase 9.2: the reply this one answers (none = top-level). */
+  parentId?: ID;
 }
 
 // ─── Drift (visual media) ───────────────────────────────────────────────────

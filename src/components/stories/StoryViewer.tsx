@@ -19,9 +19,11 @@ import Animated, {
 import { scheduleOnRN } from 'react-native-worklets';
 
 import { Avatar } from '@/components/ui/Avatar';
+import { OwnerMenu } from '@/components/ui/OwnerMenu';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { STORY_REACTIONS, StoryReplyError, sendStoryReply } from '@/services/backend/chat';
+import { removeMyStoryFrame } from '@/services/backend/ownContent';
 import { repo } from '@/services/repository';
 import { useChat } from '@/store/useChat';
 import { uuid } from '@/utils/id';
@@ -36,14 +38,14 @@ interface Props {
   startIndex: number;
 }
 
-type PauseReason = 'hold' | 'pinch' | 'input' | 'pan';
+type PauseReason = 'hold' | 'pinch' | 'input' | 'pan' | 'menu';
 
 /**
  * Full-screen story viewer.
  * Gestures: tap left/right = previous/next · hold = pause (chrome hides) ·
  * pinch = zoom (springs back) · swipe down = close.
  */
-export function StoryViewer({ queue, startIndex }: Props) {
+export function StoryViewer({ queue: opened, startIndex }: Props) {
   // Phase 8: full-screen route (covers the App Review banner too) → the phone's real insets.
   const insets = useDeviceInsets();
   const { width, height } = useWindowDimensions();
@@ -52,7 +54,15 @@ export function StoryViewer({ queue, startIndex }: Props) {
   const chip = Math.max(40, Math.min(48, Math.floor((width - 36 - 5 * 6) / 6)));
   const [storyIdx, setStoryIdx] = useState(startIndex);
   const [itemIdx, setItemIdx] = useState(0);
-  const [paused, setPaused] = useState<Record<PauseReason, boolean>>({ hold: false, pinch: false, input: false, pan: false });
+  const [paused, setPaused] = useState<Record<PauseReason, boolean>>({ hold: false, pinch: false, input: false, pan: false, menu: false });
+  // Phase 9.2: Story frames you deleted while watching leave the queue at once
+  // (by frame id, so a World's copy of the same frame goes too).
+  const [deleted, setDeleted] = useState<ReadonlySet<string>>(() => new Set());
+  const queue = useMemo(
+    () => (deleted.size ? opened.map((s) => ({ ...s, items: s.items.filter((i) => !deleted.has(storyFrameId(i.id))) })).filter((s) => s.items.length) : opened),
+    [opened, deleted],
+  );
+  const demoFrames = useChimp((s) => s.created?.stories);
   // Which item has finished loading (or timed out). Keyed by item, so moving to
   // a new item is "not ready" without resetting state in an effect.
   const [readyFor, setReadyFor] = useState<string | null>(null);
@@ -258,6 +268,23 @@ export function StoryViewer({ queue, startIndex }: Props) {
       setSending(false);
     }
   };
+  // Phase 9.2: your own Story frame can be deleted (••• → Delete story → confirm).
+  // REAL: any frame you posted; Demo: frames you posted on this phone.
+  const canDelete = own && (real || !!demoFrames?.some((s) => s.items.some((i) => i.id === item.id)));
+  const deleteFrame = async () => {
+    const frame = storyFrameId(item.id);
+    await removeMyStoryFrame(frame);
+    const next = new Set(deleted);
+    next.add(frame);
+    const remaining = opened.map((s) => s.items.filter((i) => !next.has(storyFrameId(i.id))).length);
+    const left = remaining.filter((n) => n > 0).length;
+    const here = remaining[opened.indexOf(opened.find((s) => s.id === story.id)!)] ?? 0;
+    setDeleted(next);
+    flash('Story deleted');
+    if (here > 0) setItemIdx((i) => Math.min(i, here - 1));
+    else if (storyIdx < left) setItemIdx(0); // the next Story slides into this place
+    else close();
+  };
   const sendReply = async () => {
     const text = reply.trim();
     if (!text) return;
@@ -305,6 +332,11 @@ export function StoryViewer({ queue, startIndex }: Props) {
                   </T>
                 </View>
               </Tap>
+              {canDelete ? (
+                <View style={styles.close}>
+                  <OwnerMenu what="story" onDark size={22} onDelete={deleteFrame} onOpenChange={(o) => setPaused((p) => ({ ...p, menu: o }))} />
+                </View>
+              ) : null}
               <Tap onPress={close} accessibilityLabel="Close story" style={styles.close}>
                 <X size={26} color={colors.white} strokeWidth={2.4} />
               </Tap>

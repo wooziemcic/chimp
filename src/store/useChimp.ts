@@ -157,7 +157,8 @@ export interface ChimpState extends Omit<GraphState, 'openTo'> {
   confirmAge: () => void;
   setBrowseAnonymously: (value: boolean) => void;
   /** Phase 6B: resolves with the confirmed comment (REAL: the Supabase row); rejects with a readable error. */
-  addComment: (postId: string, body: string, mode: IdentityMode) => Promise<Comment | null>;
+  /** Phase 9.2: `parentId` = a reply to that comment. */
+  addComment: (postId: string, body: string, mode: IdentityMode, parentId?: string) => Promise<Comment | null>;
   sendMessage: (threadId: string, body: string) => void;
   receiveMessage: (threadId: string, body: string) => void;
   updateProfile: (edits: Partial<ProfileEdits>) => void;
@@ -174,7 +175,8 @@ export interface ChimpState extends Omit<GraphState, 'openTo'> {
    * confirms it with Supabase. On failure it's rolled back and this rejects
    * with a readable error (the caller restores the text).
    */
-  addBuzzReply: (id: string, body: string) => Promise<void>;
+  /** Phase 9.2: `parentId` = a reply to that reply. */
+  addBuzzReply: (id: string, body: string, parentId?: string) => Promise<void>;
   toggleDriftLike: (id: string) => void;
   toggleDriftSave: (id: string) => void;
   toggleDriftDislike: (id: string) => void;
@@ -837,12 +839,12 @@ export const useChimp = create<ChimpState>()(
           });
         },
 
-        addComment: async (postId, body, mode) => {
+        addComment: async (postId, body, mode, parentId) => {
           // Keys: a board post id, or `drift:<id>` for a Drift item.
           const target = commentTarget(postId);
           const text = body.trim();
           if (!text) return null;
-          const c: Comment = { id: `cm_${uid()}`, postId, authorId: repo.meId(), authorMode: mode, body: text, createdAt: new Date().toISOString() };
+          const c: Comment = { id: `cm_${uid()}`, postId, authorId: repo.meId(), authorMode: mode, body: text, createdAt: new Date().toISOString(), ...(parentId ? { parentId } : {}) };
           get().track('comment', target.kind === 'drift' ? { kind: 'drift', id: target.id } : { kind: 'post', id: target.id });
           if (!isRealMode()) {
             set({ comments: { ...get().comments, [postId]: [...(get().comments[postId] ?? []), c] } });
@@ -852,7 +854,7 @@ export const useChimp = create<ChimpState>()(
           const u = realData.real.uid();
           try {
             if (!u) throw new Error('You’re signed out.');
-            const row = await sync.comment(u, target.kind, target.id, text);
+            const row = await sync.comment(u, target.kind, target.id, text, parentId);
             return { ...c, id: row.id, createdAt: row.created_at };
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -943,11 +945,11 @@ export const useChimp = create<ChimpState>()(
             backend('Vote', (u) => sync.vote(u, id, buzzVotes[id] ?? null));
           }),
 
-        addBuzzReply: async (id, body) => {
+        addBuzzReply: async (id, body, parentId) => {
           const text = body.trim();
           if (!text) return;
           const now = Date.now();
-          const r: BuzzReply = { id: `br_${uid()}`, buzzId: id, authorId: repo.meId(), body: text, createdAt: new Date(now).toISOString(), createdAtMs: now };
+          const r: BuzzReply = { id: `br_${uid()}`, buzzId: id, authorId: repo.meId(), body: text, createdAt: new Date(now).toISOString(), createdAtMs: now, ...(parentId ? { parentId } : {}) };
           if (!isRealMode()) {
             act(() => {
               set({ buzzReplies: { ...get().buzzReplies, [id]: [...(get().buzzReplies[id] ?? []), r] } });
@@ -961,7 +963,7 @@ export const useChimp = create<ChimpState>()(
           const u = realData.real.uid();
           try {
             if (!u) throw new Error('You’re signed out.');
-            const row = await sync.comment(u, 'buzz', id, text);
+            const row = await sync.comment(u, 'buzz', id, text, parentId);
             realData.updateReply(r.id, toReply(row));
           } catch (e) {
             realData.updateReply(r.id, null);

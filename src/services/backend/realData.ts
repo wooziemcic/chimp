@@ -202,6 +202,23 @@ export function addStoryRow(row: StoryRow, url: string) {
   publish();
 }
 
+/** Phase 9.2: a Story frame you deleted leaves every Story it was in (yours and the World's copy). */
+export function removeStoryFrame(frameId: string) {
+  if (!st) return;
+  st.storyRows = st.storyRows.filter((r) => r.id !== frameId);
+  const keep = (itemId: string) => itemId !== frameId && itemId !== `${frameId}_w`;
+  st.parts = {
+    ...st.parts,
+    stories: (st.parts.stories ?? [])
+      .map((s) => {
+        const items = s.items.filter((i) => keep(i.id));
+        return items.length === s.items.length ? s : { ...s, items, cover: items[items.length - 1]?.image ?? s.cover };
+      })
+      .filter((s) => s.items.length),
+  };
+  publish();
+}
+
 export function addReply(r: BuzzReply) {
   if (!st) return;
   st.parts = {

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, KeyboardAvoidingView, Platform, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { ReplyingTo, ThreadActions, ThreadIndent } from '@/components/comments/Thread';
 import { Avatar } from '@/components/ui/Avatar';
 import { EmptyState } from '@/components/ui/misc';
 import { OwnerMenu } from '@/components/ui/OwnerMenu';
@@ -18,6 +19,7 @@ import { repo } from '@/services/repository';
 import { commentTarget, useChimp } from '@/store/useChimp';
 import { colors, radius } from '@/theme';
 import type { Comment, IdentityMode, User } from '@/types/models';
+import { threadRows, toggleThread } from '@/utils/commentTree';
 import { whenLabel } from '@/utils/format';
 
 /**
@@ -58,7 +60,7 @@ export default function CommentsSheet() {
         const profiles = unknown.length ? await fetchPeople(unknown) : [];
         if (!live) return;
         setPeople(Object.fromEntries(profiles.map((p) => [p.id, toUser(p)])));
-        setRemote(rows.map((r) => ({ id: r.id, postId, authorId: r.author_id, authorMode: 'public', body: r.body, createdAt: r.created_at, editedAt: r.edited_at ?? undefined })));
+        setRemote(rows.map((r) => ({ id: r.id, postId, authorId: r.author_id, authorMode: 'public', body: r.body, createdAt: r.created_at, editedAt: r.edited_at ?? undefined, parentId: r.parent_id ?? undefined })));
       } catch (e) {
         if (live) {
           setLoadError(e instanceof Error ? e.message : String(e));
@@ -76,7 +78,16 @@ export default function CommentsSheet() {
     () => (real ? [...(remote ?? []), ...sent] : [...repo.seedComments(postId), ...(added ?? [])]),
     [postId, added, real, remote, sent],
   );
+  // Phase 9.2: threads — replies under the comment they answer; any thread can be collapsed.
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const rows = useMemo(() => threadRows(comments, collapsed), [comments, collapsed]);
+  const [replyTo, setReplyTo] = useState<Comment | null>(null);
   const userFor = (id: string) => repo.user(id) ?? people[id];
+  const nameOf = (c: Comment) => {
+    const mine = c.authorId === me.id;
+    if (c.authorMode !== 'public') return mine ? pseudonym : 'Verified member';
+    return mine ? 'yourself' : userFor(c.authorId)?.displayName ?? 'Chimp member';
+  };
   const subtitle = post?.title ?? post?.place?.name ?? post?.poll?.question ?? drift?.caption ?? board?.title;
 
   const [sendError, setSendError] = useState<string | null>(null);
@@ -106,14 +117,17 @@ export default function CommentsSheet() {
     }
     setText('');
     setSendError(null);
+    const parentId = replyTo?.id;
+    setReplyTo(null);
+    if (parentId) setCollapsed((c) => (c[parentId] ? toggleThread(c, parentId) : c)); // show the reply you just wrote
     if (!real) {
-      void addComment(postId, body, mode);
+      void addComment(postId, body, mode, parentId);
       return;
     }
     // REAL, optimistic: show it now, swap in the confirmed row, or roll back with an error.
     const tempId = `local_${Date.now()}`;
-    setSent((xs) => [...xs, { id: tempId, postId, authorId: me.id, authorMode: 'public', body, createdAt: new Date().toISOString(), status: 'sending' }]);
-    addComment(postId, body, 'public')
+    setSent((xs) => [...xs, { id: tempId, postId, authorId: me.id, authorMode: 'public', body, createdAt: new Date().toISOString(), status: 'sending', ...(parentId ? { parentId } : {}) }]);
+    addComment(postId, body, 'public', parentId)
       .then((row) => setSent((xs) => xs.map((c) => (c.id === tempId && row ? { ...row, status: undefined } : c))))
       .catch((e: unknown) => {
         setSent((xs) => xs.filter((c) => c.id !== tempId));
@@ -132,17 +146,20 @@ export default function CommentsSheet() {
         </T>
       ) : null}
       <FlatList
-        data={comments}
-        keyExtractor={(c) => c.id}
+        data={rows}
+        keyExtractor={(r) => r.item.id}
         keyboardDismissMode="interactive"
         contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 16, gap: 14 }}
         ListEmptyComponent={remote === null ? null : <EmptyState title="No comments yet" body="Start the conversation." />}
-        renderItem={({ item }) => {
+        renderItem={({ item: row }) => {
+          const item = row.item;
           const mine = item.authorId === me.id;
           const u = userFor(item.authorId);
           const masked = item.authorMode !== 'public';
+          const settled = !item.status && !item.id.startsWith('local');
           return (
-            <View style={{ flexDirection: 'row' }}>
+            <ThreadIndent depth={row.depth}>
+            <View style={{ flexDirection: 'row' }} testID="comment-row">
               {masked ? (
                 <View style={styles.mask}>
                   <VenetianMask size={16} color={colors.inkMuted} />
@@ -158,20 +175,41 @@ export default function CommentsSheet() {
                 <T v="subhead" weight="400" color={colors.ink2} style={{ marginTop: 2 }}>
                   {item.body}
                 </T>
+                <ThreadActions
+                  onReply={
+                    settled
+                      ? () => {
+                          setEditing(null);
+                          setReplyTo(item);
+                          setSendError(null);
+                        }
+                      : undefined
+                  }
+                  replies={row.replies}
+                  collapsed={!!collapsed[item.id]}
+                  onToggle={() => setCollapsed((c) => toggleThread(c, item.id))}
+                  replyTo={row.replyTo ? nameOf(row.replyTo) : undefined}
+                />
               </View>
-              {real && mine && !item.status && !item.id.startsWith('local') ? (
+              {real && mine && settled ? (
                 <OwnerMenu
                   what="reply"
                   size={16}
                   createdAtMs={Date.parse(item.createdAt)}
                   onEdit={() => {
+                    setReplyTo(null);
                     setEditing(item);
                     setText(item.body);
                     setSendError(null);
                   }}
                   onDelete={async () => {
                     await deleteComment(item.id);
+                    // Replies stay (the server keeps them; they become top-level).
                     replaceLocal(item.id, null);
+                    const orphan = (c: Comment) => (c.parentId === item.id ? { ...c, parentId: undefined } : c);
+                    setRemote((xs) => (xs ? xs.map(orphan) : xs));
+                    setSent((xs) => xs.map(orphan));
+                    if (replyTo?.id === item.id) setReplyTo(null);
                     if (editing?.id === item.id) {
                       setEditing(null);
                       setText('');
@@ -180,6 +218,7 @@ export default function CommentsSheet() {
                 />
               ) : null}
             </View>
+            </ThreadIndent>
           );
         }}
       />
@@ -208,6 +247,7 @@ export default function CommentsSheet() {
             </Tap>
           </View>
         ) : null}
+        {replyTo && !editing ? <ReplyingTo name={nameOf(replyTo)} onCancel={() => setReplyTo(null)} /> : null}
         {canPseudo ? (
           <View style={styles.modes}>
             {(['public', 'pseudonymous'] as const).map((m) => (
@@ -223,7 +263,7 @@ export default function CommentsSheet() {
           <TextInput
             value={text}
             onChangeText={setText}
-            placeholder="Add a comment…"
+            placeholder={replyTo && !editing ? 'Write a reply…' : 'Add a comment…'}
             placeholderTextColor={colors.inkFaint}
             style={styles.input}
             multiline

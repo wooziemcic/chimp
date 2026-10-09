@@ -1,6 +1,6 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { Check, ChevronRight, Pin, UserPlus } from 'lucide-react-native';
+import { Check, ChevronRight, UserPlus } from 'lucide-react-native';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -13,8 +13,7 @@ import { Img } from '@/components/ui/Img';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
-import { openWorldActions } from '@/components/worlds/WorldActionSheet';
-import { type ChangeLine, type NowCard, changedSince, happeningNow, peopleToKnow, pinnedWorlds, storiesRow } from '@/graph/happeningNow';
+import { type ChangeLine, type NowCard, changedSince, happeningNow, peopleToKnow, storiesRow } from '@/graph/happeningNow';
 import { useGraphCtx } from '@/hooks/useGraph';
 import { useTabBarSpace } from '@/hooks/useLayout';
 import { useNow } from '@/hooks/useNow';
@@ -28,19 +27,16 @@ import { useHappening } from '@/store/useHappening';
 import { usePins } from '@/store/usePins';
 import { useSocialInbox } from '@/store/useSocialInbox';
 import { colors, radius, shadow } from '@/theme';
-import type { Board } from '@/types/models';
-import { compact, timeAgo } from '@/utils/format';
+import { timeAgo } from '@/utils/format';
 import { hrefFor } from '@/utils/links';
 import { pushOnce } from '@/utils/nav';
-
-/** Selective gold: pins only. */
-const GOLD = '#A77B1E';
 
 /**
  * Happening (Phase 9) — "What changed that matters".
  *
- *   Stories · Pinned Worlds · Happening Now (3–5) · People you may want to
- *   know · Changed since you were here
+ *   Stories · Happening Now (3–5) · People you may want to know · Changed
+ *   since you were here. (Phase 9.2: pinned Boards moved to the top of
+ *   Boards — they're no longer repeated here; pins still help rank Now.)
  *
  * Built only from real events (graph/happeningNow.ts, deterministic and
  * documented there). With a small network the sections get shorter; nothing
@@ -98,8 +94,6 @@ export default function HappeningScreen() {
   );
 
   const stories = useMemo(() => storiesRow(ctx, seen, now), [ctx, seen, now]);
-  // (Re-derived when the dataset changes: a World you can no longer see drops out.)
-  const pinned = useMemo(() => (pinsOwner === owner && data.boards.length ? pinnedWorlds(ctx, pins) : []), [ctx, pins, pinsOwner, owner, data.boards]);
   const cards = useMemo(
     () =>
       happeningNow(ctx, {
@@ -150,23 +144,6 @@ export default function HappeningScreen() {
             Stories from people you follow show up here for 24 hours.
           </T>
         ) : null}
-
-        {/* B. Pinned Worlds. */}
-        <SectionTitle title="Pinned" />
-        {pinned.length ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }} testID="happening-pinned">
-            {pinned.map((b) => (
-              <PinnedWorld key={b.id} board={b} />
-            ))}
-          </ScrollView>
-        ) : (
-          <View style={styles.hint} testID="pinned-empty">
-            <Pin size={15} color={GOLD} />
-            <T v="footnote" color={colors.inkMuted} style={{ marginLeft: 8, flex: 1 }}>
-              Long-press any World to pin it here.
-            </T>
-          </View>
-        )}
 
         {/* C. Happening Now. */}
         <SectionTitle title="Happening now" />
@@ -241,37 +218,6 @@ function SectionTitle({ title, action }: { title: string; action?: { label: stri
         </Tap>
       ) : null}
     </View>
-  );
-}
-
-function PinnedWorld({ board }: { board: Board }) {
-  const owner = board.ownerId && !repo.isMe(board.ownerId) ? repo.user(board.ownerId) : undefined;
-  const members = board.memberCount;
-  return (
-    <Tap
-      onPress={() => pushOnce(`/board/${board.id}`)}
-      onLongPress={() => openWorldActions(board.id)}
-      delayLongPress={380}
-      scaleTo={0.97}
-      style={[styles.pin, shadow.sm]}
-      accessibilityLabel={`${board.title}, pinned${owner?.username ? `, by @${owner.username}` : ''}`}
-      accessibilityHint="Long-press to unpin"
-      testID={`pinned-${board.id}`}
-    >
-      <Img uri={board.cover} style={styles.pinCover} />
-      <View style={styles.pinBadge}>
-        <Pin size={11} color={GOLD} fill={GOLD} />
-      </View>
-      <View style={{ padding: 10 }}>
-        <T v="subhead" weight="700" numberOfLines={1}>
-          {board.title}
-        </T>
-        <T v="caption" color={colors.inkMuted} numberOfLines={1}>
-          {repo.isMe(board.ownerId) ? 'Your World' : owner?.username ? `by @${owner.username}` : board.ownerId ? 'A member’s World' : 'Chimp World'}
-          {members ? ` · ${compact(members)}` : ''}
-        </T>
-      </View>
-    </Tap>
   );
 }
 
@@ -394,24 +340,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.line,
-  },
-  pin: {
-    width: 150,
-    borderRadius: radius.lg,
-    backgroundColor: colors.surface,
-    overflow: 'hidden',
-  },
-  pinCover: { width: 150, height: 100 },
-  pinBadge: {
-    position: 'absolute',
-    top: 8,
-    right: 8,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.94)',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   now: {
     flexDirection: 'row',

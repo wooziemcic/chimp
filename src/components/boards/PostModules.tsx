@@ -1,15 +1,17 @@
 import { router } from 'expo-router';
 import { ChartNoAxesColumn, Bookmark, Ellipsis, Heart, Map as MapIcon, MapPin, MessageCircle, Utensils, VenetianMask } from 'lucide-react-native';
-import { memo, ReactNode } from 'react';
+import { memo, ReactNode, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import Svg, { Circle, Path } from 'react-native-svg';
 
+import { PhotoCarousel } from '@/components/media/PhotoCarousel';
 import { Avatar } from '@/components/ui/Avatar';
 import { Img } from '@/components/ui/Img';
 import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
+import { openMedia } from '@/store/useMediaViewer';
 import { colors, radius, shadow } from '@/theme';
 import type { BoardTheme, Post } from '@/types/models';
 import { compact } from '@/utils/format';
@@ -89,11 +91,29 @@ export function Reactions({ post, theme }: ModuleProps) {
 
 // ─── Photo post ─────────────────────────────────────────────────────────────
 
+/**
+ * Every photo of a post (was: only the first). One photo shows as before;
+ * several swipe sideways with the same carousel Buzz uses, and a tap opens
+ * the same full-screen viewer.
+ */
+function PostPhotos({ post }: { post: Post }) {
+  const imgs = post.images ?? [];
+  const [w, setW] = useState(0);
+  if (!imgs.length) return null;
+  if (imgs.length === 1) return <Img uri={imgs[0]} style={styles.photo} />;
+  const open = (i: number) => openMedia(imgs, undefined, i, { caption: post.title ?? post.body, authorName: post.authorMode === 'public' ? repo.user(post.authorId)?.displayName : undefined, context: repo.board(post.boardId)?.title });
+  return (
+    <View style={styles.photoClip} onLayout={(e) => setW(Math.round(e.nativeEvent.layout.width))} testID="post-photos">
+      {w ? <PhotoCarousel images={imgs} width={w} height={Math.round(w / 1.35)} onOpen={open} /> : <View style={{ aspectRatio: 1.35 }} />}
+    </View>
+  );
+}
+
 export const PhotoPost = memo(function PhotoPost({ post, theme }: ModuleProps) {
   return (
     <View style={[styles.module, { backgroundColor: theme.surface, borderColor: theme.line }]}>
       <Author post={post} theme={theme} />
-      {post.images?.[0] ? <Img uri={post.images[0]} style={styles.photo} /> : null}
+      <PostPhotos post={post} />
       {post.title ? (
         <T v="headline" color={theme.text} style={{ marginTop: 10 }}>
           {post.title}
@@ -346,6 +366,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   photo: { width: '100%', aspectRatio: 1.35, borderRadius: 14 },
+  photoClip: { width: '100%', borderRadius: 14, overflow: 'hidden' },
   kicker: { flexDirection: 'row', alignItems: 'center' },
   reactions: { flexDirection: 'row', alignItems: 'center', marginTop: 8, marginBottom: -4 },
   reaction: { flexDirection: 'row', alignItems: 'center', minHeight: 40, paddingRight: 14 },
