@@ -285,17 +285,23 @@ export async function fetchRealRaw(uid: string): Promise<RealRaw> {
 }
 
 /** Rows → the app's types. Pure (used for both a fresh load and the cached one). */
-export function mapRealWorld(raw: RealRaw): RealWorld {
-  const { uid, profile } = raw;
-  const other = (c: { user_a: string; user_b: string }) => (c.user_a === uid ? c.user_b : c.user_a);
+/** Media rows → URL, aspect and video lookups (one rule for the full load and single posts). */
+function mediaMaps(rows: MediaRow[]): { media: Record<string, string>; aspects: MediaAspects; videos: MediaVideos } {
   const media: Record<string, string> = {};
   const aspects: MediaAspects = {};
   const videos: MediaVideos = {};
-  for (const r of raw.media) {
+  for (const r of rows) {
     media[r.id] = mediaUrl(r.storage_path);
     if (r.width && r.height) aspects[r.id] = r.width / r.height;
     if (r.kind === 'video') videos[r.id] = { poster: r.poster_path ? mediaUrl(r.poster_path) : undefined, durationMs: r.duration_ms ?? undefined };
   }
+  return { media, aspects, videos };
+}
+
+export function mapRealWorld(raw: RealRaw): RealWorld {
+  const { uid, profile } = raw;
+  const other = (c: { user_a: string; user_b: string }) => (c.user_a === uid ? c.user_b : c.user_a);
+  const { media, aspects, videos } = mediaMaps(raw.media);
   const membersBy = new Map<string, string[]>();
   for (const m of raw.members) membersBy.set(m.board_id, [...(membersBy.get(m.board_id) ?? []), m.user_id]);
   const boardsMapped = raw.boards.map((r) => {
@@ -377,6 +383,31 @@ export function mapRealWorld(raw: RealRaw): RealWorld {
 export async function loadRealWorld(uid: string): Promise<RealWorld & { raw: RealRaw }> {
   const raw = await fetchRealRaw(uid);
   return { ...mapRealWorld(raw), raw };
+}
+
+/**
+ * Reliability patch: a few posts by id (a post someone just shared in a World
+ * you follow, or one opened from a notification that isn't loaded yet), with
+ * their media. RLS decides what comes back; ids you can't see are simply missing.
+ */
+export async function fetchPostsByIds(kind: 'buzz' | 'drift', ids: string[]): Promise<{ buzz: BuzzItem[]; drift: DriftItem[]; authors: string[] }> {
+  const out = { buzz: [] as BuzzItem[], drift: [] as DriftItem[], authors: [] as string[] };
+  if (!ids.length) return out;
+  const table = kind === 'buzz' ? 'buzz_items' : 'drift_items';
+  const rows = must(await sb().from(table).select('*').in('id', ids.slice(0, 50)), 'Loading post') as (BuzzRow | DriftRow)[];
+  if (!rows.length) return out;
+  const mediaIds = [...new Set(rows.flatMap((r) => r.media_ids ?? []))];
+  const mediaRows = mediaIds.length ? (must(await sb().from('media').select('*').in('id', mediaIds), 'Loading media') as MediaRow[]) : [];
+  const { media, aspects, videos } = mediaMaps(mediaRows);
+  if (kind === 'buzz') out.buzz = (rows as BuzzRow[]).map((r) => toBuzz(r, media, aspects, videos));
+  else out.drift = (rows as DriftRow[]).map((r) => toDrift(r, media));
+  out.authors = [...new Set(rows.map((r) => r.author_id))];
+  return out;
+}
+
+/** Reliability patch: like totals (everyone's) for a few posts of one kind. null = not available. */
+export async function fetchLikeTotalsFor(kind: 'buzz' | 'drift', ids: string[]): Promise<Record<string, number> | null> {
+  return likeCounts(kind, ids);
 }
 
 /** Phase 6C: refresh only the real like totals (Trending stays honest without a full reload). */

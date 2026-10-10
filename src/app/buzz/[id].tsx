@@ -16,6 +16,7 @@ import { scoreBuzz } from '@/graph/surfaces';
 import { useGraphCtx, useMyAvatar } from '@/hooks/useGraph';
 import { removeMyReply, saveReplyEdit } from '@/services/backend/ownContent';
 import { useDataset } from '@/services/dataset';
+import { syncPostNow } from '@/services/postSync';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
 import { colors, radius } from '@/theme';
@@ -49,6 +50,18 @@ export default function BuzzThread() {
   useEffect(() => {
     if (item) markSeen({ kind: 'buzz', id: item.id });
   }, [item, markSeen]);
+  // Reliability patch: opening a post (e.g. from a "liked your post" notification) brings
+  // its like total and comments up to date now — and fetches it if it isn't loaded yet.
+  const [checking, setChecking] = useState(!item && repo.mode() === 'real');
+  useEffect(() => {
+    let alive = true;
+    void syncPostNow('buzz', id).finally(() => {
+      if (alive) setChecking(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [id]);
 
   const why = useMemo(() => (item ? scoreBuzz(ctx, item).reasons.filter((r) => r.kind !== 'editorial').slice(0, 3) : []), [ctx, item]);
   const replies = useMemo(() => [...data.buzzReplies.filter((r) => r.buzzId === id), ...mine], [data.buzzReplies, id, mine]);
@@ -62,6 +75,7 @@ export default function BuzzThread() {
   const expand = (rid: string) => setCollapsed((c) => (c[rid] ? toggleThread(c, rid) : c));
   const nameOf = (r: BuzzReply) => (repo.isMe(r.authorId) ? 'yourself' : repo.user(r.authorId)?.displayName ?? 'Someone');
 
+  if (!item && checking) return <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }} testID="post-checking" />;
   if (!item) return <EmptyState title="This post isn’t available" body="It may have been deleted, or you no longer have access." action={<Button label="Go back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/buzz'))} />} />;
   const board = repo.board(item.boardId);
 

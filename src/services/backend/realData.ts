@@ -147,6 +147,59 @@ export function applyLikeTotals(totals: Record<string, number>, mine: (kind: 'bu
   publish();
 }
 
+/**
+ * Reliability patch: fresh like totals for SOME posts only (a like event, a
+ * post opened from a notification). Posts not in `keys` are left alone —
+ * unlike applyLikeTotals, which treats a missing total as 0.
+ */
+export function applyLikeTotalsFor(keys: string[], totals: Record<string, number>, mine: (kind: 'buzz' | 'drift', id: string) => boolean) {
+  if (!st || !keys.length) return;
+  const want = new Set(keys);
+  let changed = false;
+  const fix = <T extends { id: string; likeCount: number }>(kind: 'buzz' | 'drift', x: T): T => {
+    const k = `${kind}:${x.id}`;
+    if (!want.has(k)) return x;
+    const n = Math.max(0, (totals[k] ?? 0) - (mine(kind, x.id) ? 1 : 0));
+    if (n === x.likeCount) return x;
+    changed = true;
+    return { ...x, likeCount: n };
+  };
+  const buzz = (st.parts.buzz ?? []).map((b) => fix('buzz', b));
+  const drift = (st.parts.drift ?? []).map((d) => fix('drift', d));
+  if (!changed) return;
+  st.parts = { ...st.parts, buzz, drift };
+  publish();
+}
+
+/**
+ * Reliability patch: one post's replies, as the server has them now (a
+ * comment event, a post opened from a notification). Your own replies still
+ * on their way (status set) are kept.
+ */
+export function setRepliesFor(buzzId: ID, replies: BuzzReply[]) {
+  if (!st) return;
+  const all = st.parts.buzzReplies ?? [];
+  const pending = all.filter((r) => r.buzzId === buzzId && r.status && !replies.some((x) => x.id === r.id));
+  const before = all.filter((r) => r.buzzId === buzzId);
+  const next = [...replies, ...pending];
+  const same = before.length === next.length && next.every((r) => before.some((b) => b.id === r.id && b.body === r.body && b.editedAtMs === r.editedAtMs && b.parentId === r.parentId && b.status === r.status));
+  const buzz = st.parts.buzz ?? [];
+  const cur = buzz.find((b) => b.id === buzzId);
+  if (same && (!cur || cur.replyCount === next.length)) return;
+  st.parts = {
+    ...st.parts,
+    buzzReplies: [...all.filter((r) => r.buzzId !== buzzId), ...next],
+    buzz: cur ? buzz.map((b) => (b.id === buzzId ? { ...b, replyCount: next.length } : b)) : buzz,
+  };
+  publish();
+}
+
+/** Reliability patch: is this post already in the loaded world? */
+export function hasPost(kind: 'buzz' | 'drift', id: ID): boolean {
+  if (!st) return false;
+  return kind === 'buzz' ? (st.parts.buzz ?? []).some((b) => b.id === id) : (st.parts.drift ?? []).some((d) => d.id === id);
+}
+
 /** Phase 6C: change a World in place (e.g. a new cover) — every surface sees it at once. */
 export function updateBoard(id: string, patch: Partial<Board>) {
   if (!st) return;
@@ -237,6 +290,16 @@ export function updateReply(tempId: string, next: BuzzReply | null) {
   if (!st) return;
   const cur = (st.parts.buzzReplies ?? []).find((r) => r.id === tempId);
   if (!cur) return;
+  // Reliability patch: a targeted comment sync already brought the confirmed row — drop the temporary copy.
+  if (next && (st.parts.buzzReplies ?? []).some((r) => r.id === next.id)) {
+    st.parts = {
+      ...st.parts,
+      buzzReplies: (st.parts.buzzReplies ?? []).filter((r) => r.id !== tempId),
+      buzz: (st.parts.buzz ?? []).map((b) => (b.id === cur.buzzId ? { ...b, replyCount: Math.max(0, b.replyCount - 1) } : b)),
+    };
+    publish();
+    return;
+  }
   st.parts = {
     ...st.parts,
     buzzReplies: next ? (st.parts.buzzReplies ?? []).map((r) => (r.id === tempId ? next : r)) : (st.parts.buzzReplies ?? []).filter((r) => r.id !== tempId),

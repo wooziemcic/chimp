@@ -15,6 +15,8 @@ import { Tap } from '@/components/ui/Tap';
 import { T } from '@/components/ui/Text';
 import { driftQueue, isAfterDarkBoard } from '@/graph/surfaces';
 import { useGraphCtx } from '@/hooks/useGraph';
+import { useDatasetVersion } from '@/services/dataset';
+import { syncPostNow } from '@/services/postSync';
 import { repo } from '@/services/repository';
 import { useChimp } from '@/store/useChimp';
 import { colors, fonts } from '@/theme';
@@ -36,14 +38,27 @@ export default function DriftViewer() {
   const { height, width } = useWindowDimensions();
   const ctx = useGraphCtx();
   const markSeen = useChimp((s) => s.markSeen);
-  // Freeze the queue at open time.
+  // Reliability patch: opening a post (e.g. from a notification) brings its like total
+  // up to date now — and fetches the post itself if it isn't loaded yet.
+  const present = useDatasetVersion(() => !!repo.driftItem(id));
+  const [checking, setChecking] = useState(!present && repo.mode() === 'real');
+  useEffect(() => {
+    let alive = true;
+    void syncPostNow('drift', id).finally(() => {
+      if (alive) setChecking(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+  // Freeze the queue at open time (or when the post arrives).
   const queue = useMemo(() => {
     const start = repo.driftItem(id);
     if (!start) return [];
     const ranked = driftQueue(ctx);
     return isAfterDarkBoard(repo.board(start.boardId)) ? [start] : ranked.some((d) => d.id === id) ? ranked : [start, ...ranked];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, present]);
   const startIndex = Math.max(0, queue.findIndex((d) => d.id === id));
 
   const watchDrift = useChimp((s) => s.watchDrift);
@@ -70,6 +85,7 @@ export default function DriftViewer() {
 
   const getItemLayout = useCallback((_: unknown, index: number) => ({ length: height, offset: height * index, index }), [height]);
 
+  if (!queue.length && checking) return <View style={{ flex: 1, backgroundColor: '#000' }} testID="post-checking" />;
   if (!queue.length) return <EmptyState title="This post isn’t available" body="It may have been deleted, or you no longer have access." action={<Button label="Go back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/buzz'))} />} />;
 
   return (
@@ -104,6 +120,8 @@ function DriftPage({ item, width, height, active }: { item: DriftItem; width: nu
   const board = repo.board(item.boardId);
   const author = repo.user(item.authorId);
   const ownLikes = repo.mode() === 'real' && repo.isMe(item.authorId);
+  // The queue is a snapshot; the like total is read live (a like event / sync updates it at once).
+  const likeCount = useDatasetVersion(() => repo.driftItem(item.id)?.likeCount ?? item.likeCount);
 
   return (
     <View style={{ width, height }}>
@@ -157,9 +175,9 @@ function DriftPage({ item, width, height, active }: { item: DriftItem; width: nu
             <Tap onPress={() => toggleLike(item.id)} haptic="light" accessibilityLabel={liked ? 'Unlike' : 'Like'}>
               <Heart size={28} color={liked ? '#FF3D6E' : colors.white} fill={liked ? '#FF3D6E' : 'transparent'} />
             </Tap>
-            <Tap onPress={() => router.push(`/likes/drift:${item.id}`)} accessibilityLabel={`${compact(item.likeCount + (liked ? 1 : 0))} likes. See who liked this`} testID="likes-count" style={{ minWidth: 44, alignItems: 'center' }}>
+            <Tap onPress={() => router.push(`/likes/drift:${item.id}`)} accessibilityLabel={`${compact(likeCount + (liked ? 1 : 0))} likes. See who liked this`} testID="likes-count" style={{ minWidth: 44, alignItems: 'center' }}>
               <T v="caption" color={colors.white} weight="700">
-                {compact(item.likeCount + (liked ? 1 : 0))}
+                {compact(likeCount + (liked ? 1 : 0))}
               </T>
             </Tap>
           </View>
@@ -167,7 +185,7 @@ function DriftPage({ item, width, height, active }: { item: DriftItem; width: nu
           <Tap onPress={() => toggleLike(item.id)} haptic="light" accessibilityLabel={liked ? 'Unlike' : 'Like'} style={styles.action}>
             <Heart size={28} color={liked ? '#FF3D6E' : colors.white} fill={liked ? '#FF3D6E' : 'transparent'} />
             <T v="caption" color={colors.white} weight="700">
-              {compact(item.likeCount + (liked ? 1 : 0))}
+              {compact(likeCount + (liked ? 1 : 0))}
             </T>
           </Tap>
         )}

@@ -111,12 +111,38 @@ export async function fetchMessages(conversationId: string, limit = 60): Promise
 }
 
 /**
+ * Reliability patch: what changed in a chat since `since` (the newest message
+ * this phone already has, in server time) — newer messages, and which of the
+ * messages we hold were unsent meanwhile. Two small queries instead of
+ * re-reading the newest 60. `full` = there may be more than `limit` new ones
+ * (the caller then does a normal full load).
+ */
+export async function fetchMessagesSince(conversationId: string, since: string, knownIds: string[], limit = 60): Promise<{ rows: MessageRow[]; gone: string[]; full: boolean }> {
+  const ids = knownIds.slice(-60);
+  const [fresh, unsent] = await Promise.all([
+    sb().from('messages').select('*').eq('conversation_id', conversationId).gt('created_at', since).order('created_at', { ascending: true }).limit(limit),
+    ids.length ? sb().from('messages').select('id,deleted_at').eq('conversation_id', conversationId).in('id', ids).not('deleted_at', 'is', null) : Promise.resolve({ data: [], error: null }),
+  ]);
+  const raw = must(fresh, 'Loading messages') as MessageRow[];
+  const from = Date.parse(since);
+  const rows = raw.filter((r) => !r.deleted_at && !(Date.parse(r.created_at) < from));
+  const gone = ((must(unsent, 'Loading messages') as { id: string; deleted_at: string | null }[]) ?? []).filter((r) => !!r.deleted_at).map((r) => r.id);
+  // `full` from what the server returned (unsent rows included): a full page means there may be more.
+  return { rows: rows.sort((a, b) => a.created_at.localeCompare(b.created_at)), gone, full: raw.length >= limit };
+}
+
+/** Reliability patch: a send waits at most this long for the server, then counts as a network failure (and is retried — same clientId, never a duplicate). */
+export const SEND_TIMEOUT_MS = 12_000;
+
+/**
  * Send one message. `clientId` makes retries idempotent: if the first attempt
  * actually reached the server, the retry returns that same row (no duplicate).
  */
 export async function sendMessage(uid: string, conversationId: string, clientId: string, body: string | null, media?: { id: string } | null, replyTo?: string | null, extra?: SendExtra): Promise<MessageRow> {
   const type = media ? extra?.kind ?? 'photo' : 'text';
-  const res = await sb()
+  const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), SEND_TIMEOUT_MS) : null;
+  const insert = sb()
     .from('messages')
     .insert({
       conversation_id: conversationId,
@@ -130,8 +156,13 @@ export async function sendMessage(uid: string, conversationId: string, clientId:
       ...(extra?.viewOnce ? { view_once: true } : {}),
       ...(type === 'voice' && extra?.durationMs != null ? { duration_ms: Math.round(extra.durationMs) } : {}),
     })
-    .select('*')
-    .single();
+    .select('*');
+  const res = await (ctl ? insert.abortSignal(ctl.signal) : insert).single().then(
+    (r) => r,
+    (e: unknown) => ({ data: null, error: { message: e instanceof Error ? e.message : String(e), code: '' } }),
+  );
+  if (timer) clearTimeout(timer);
+  if (res.error && ctl?.signal.aborted) throw new TypeError('Network request timed out');
   if (res.error?.code === '23505') {
     const again = await sb().from('messages').select('*').eq('conversation_id', conversationId).eq('sender_id', uid).eq('client_id', clientId).single();
     return must(again, 'Sending') as MessageRow;
@@ -446,6 +477,8 @@ export function subscribeConversation(
     onLoopGone: (id: string) => void;
     onMatch: (m: PingMatchRow) => void;
     onMembers: (change: MemberChange) => void;
+    /** Reliability patch: channel status (SUBSCRIBED after a drop → catch up on what this channel carries). */
+    onStatus?: (s: string) => void;
   },
 ): () => void {
   const f = `conversation_id=eq.${cid}`;
@@ -459,7 +492,7 @@ export function subscribeConversation(
     .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'chat_loops' }, (p) => h.onLoopGone((p.old as { id: string }).id))
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ping_matches', filter: f }, (p) => h.onMatch(p.new as PingMatchRow))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_members', filter: f }, (p) => h.onMembers(memberChange(p)))
-    .subscribe();
+    .subscribe((status) => h.onStatus?.(status));
   return () => {
     void sb().removeChannel(channel);
   };
@@ -469,13 +502,22 @@ export function subscribeConversation(
  * Listen for new messages in any of my conversations (and membership changes,
  * e.g. someone accepting a request). Returns an unsubscribe function.
  */
-export function subscribeInbox(uid: string, handlers: { onMessage: (m: MessageRow) => void; onMessageUpdate?: (m: MessageRow) => void; onMembers: (change: MemberChange) => void; onConversation?: () => void; onStatus?: (s: string) => void }): () => void {
+/** The parts of a `conversations` row the inbox cares about (Realtime UPDATE payload). */
+export interface ConversationChange {
+  id: string;
+  kind?: string | null;
+  title?: string | null;
+  avatar_url?: string | null;
+  last_message_id?: string | null;
+}
+
+export function subscribeInbox(uid: string, handlers: { onMessage: (m: MessageRow) => void; onMessageUpdate?: (m: MessageRow) => void; onMembers: (change: MemberChange) => void; onConversation?: (row: ConversationChange | null) => void; onStatus?: (s: string) => void }): () => void {
   const channel: RealtimeChannel = sb()
     .channel(`inbox:${uid}:${topicSeq()}`)
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => handlers.onMessage(payload.new as MessageRow))
     // 0006: a deleted (unsent) message, and group renames / photos.
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, (payload) => handlers.onMessageUpdate?.(payload.new as MessageRow))
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversations' }, () => handlers.onConversation?.())
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversations' }, (p) => handlers.onConversation?.((p.new as ConversationChange | undefined) ?? null))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'conversation_members' }, (p) => handlers.onMembers(memberChange(p)))
     .subscribe((status) => handlers.onStatus?.(status));
   return () => {

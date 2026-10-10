@@ -18,6 +18,18 @@
  *              cursor changes (Realtime), on open, on reconnect / foreground
  *   stop()          → on sign-out / account switch (nothing leaks between accounts)
  *
+ * Reliability patch (real-device stalls):
+ *   - one shared wake (services/realtimeHealth.ts) instead of this store's
+ *     own AppState listener; channels run under a ChannelSupervisor
+ *   - catch-up is single-flight and incremental: the inbox list (1 RPC) and,
+ *     for the open chat, only messages newer than the newest one we have plus
+ *     which of ours were unsent — not the newest 60 again and not every extra
+ *   - a send that hits a dead connection times out (12 s) instead of hanging,
+ *     retries once quietly, and resumes by itself when the app or network is
+ *     back (same clientId → never a duplicate; one delivery at a time per message)
+ *   - a new message no longer reloads the inbox: the message itself updates
+ *     the preview; only a rename / new photo / new conversation reloads it
+ *
  * Final messaging patch: one store, two backends (services/chatApi.ts).
  * REAL accounts use Supabase; the Demo account uses an in-memory seeded
  * stand-in (services/demoChat.ts). Which one is fixed at start(), so REAL
@@ -26,12 +38,13 @@
 import { AppState } from 'react-native';
 import { create } from 'zustand';
 
-import type { ConversationRow, GroupRole, LoopPatch, LoopRow, MemberChange, MemberRow, MemberStatus, MessageRow, PingKind, PingMatchRow, PingRow, ReactionRow, ReceiptRow, SameBrainRow } from '@/services/backend/chat';
+import type { ConversationChange, ConversationRow, GroupRole, LoopPatch, LoopRow, MemberChange, MemberRow, MemberStatus, MessageRow, PingKind, PingMatchRow, PingRow, ReactionRow, ReceiptRow, SameBrainRow } from '@/services/backend/chat';
 import { fetchPeople } from '@/services/backend/content';
 import { toUser } from '@/services/backend/mappers';
 import { kindOf } from '@/services/backend/errors';
 import { discardMediaById, type PickedImage } from '@/services/backend/media';
 import { type ChatApi, realChatApi } from '@/services/chatApi';
+import { ChannelSupervisor, onWake, singleFlight, type SupervisedStatus } from '@/services/realtimeHealth';
 import { repo } from '@/services/repository';
 import type { User } from '@/types/models';
 import { onAccountChange } from './useSession';
@@ -206,11 +219,48 @@ const EMPTY = {
 };
 
 let api: ChatApi = realChatApi;
-let unsubscribe: (() => void) | null = null;
-let appStateSub: { remove: () => void } | null = null;
+/** The inbox channel (one per signed-in account). */
+let inbox: ChannelSupervisor | null = null;
+let wakeSub: (() => void) | null = null;
 let reloadTimer: ReturnType<typeof setTimeout> | null = null;
 /** Per-conversation live channels (only while a conversation is open). */
-const convSubs = new Map<string, () => void>();
+const convSubs = new Map<string, ChannelSupervisor>();
+/** Reliability patch: when each chat's messages were last fully loaded / its extras loaded (ms). */
+const fullAt = new Map<string, number>();
+/**
+ * The newest message (server time) each chat's last fetch returned — what the
+ * next incremental fetch asks "newer than". Messages that arrive over Realtime
+ * don't move it: if the channel was down, a message from before the reconnect
+ * could otherwise be skipped by asking only for what's newer than the latest live one.
+ */
+const syncedTo = new Map<string, string>();
+/** My own read cursor per chat, as last seen on Realtime (to tell "read on another device" from "delivered here"). */
+const myReadAt = new Map<string, string>();
+const extrasAt = new Map<string, number>();
+/** One message sync per chat at a time (a request during a run → one more run after it). */
+const msgSync = new Map<string, Promise<void>>();
+const msgAgain = new Set<string>();
+/** One delivery per message at a time (a tap on Retry during an automatic resume doesn't send twice). */
+const inflight = new Map<string, Promise<void>>();
+/** Automatic resumes used per message (after this many it waits for a Retry tap). */
+const autoResumes = new Map<string, number>();
+
+/** Tunables (exported for tests). */
+export const CHAT_SYNC = {
+  /** A chat whose full load is older than this gets a full load again (not just what's new). */
+  fullStaleMs: 10 * 60_000,
+  /** Extras (members, reactions, Same Brain, loops, Pings) re-read on open only when older than this. */
+  extrasStaleMs: 5 * 60_000,
+  /** A send that failed on the network is tried once more after this, quietly. */
+  quickRetryMs: 1_500,
+  /** Automatic resumes (app / network back) per failed message before it waits for a tap. */
+  maxAutoResumes: 3,
+  /** Incremental fetches reach this far back before the last one (late commits; duplicates are dropped by id). */
+  overlapMs: 2_000,
+};
+
+/** Requests that a catch-up made (tests / census). */
+export const chatSyncStats = { full: 0, incremental: 0, extras: 0, inboxLoads: 0 };
 /** Same Brain moments already played on this device (message|emoji). */
 const flashed = new Set<string>();
 /** Ping matches already revealed / dismissed on this device. */
@@ -532,7 +582,22 @@ export const useChat = create<ChatState>((set, get) => {
 
   const subscribeOpen = (cid: string) => {
     if (convSubs.has(cid)) return;
-    const unsub = api.subscribeConversation(cid, {
+    const sup = new ChannelSupervisor({
+      name: 'conversation',
+      open: (onStatus) => api.subscribeConversation(cid, { ...convHandlers(cid), onStatus }),
+      // Back after a drop: reactions / loops / members may have changed meanwhile (messages come from the inbox catch-up).
+      onLive: ({ afterDown }) => {
+        if (afterDown && convSubs.get(cid) === sup) {
+          void get().loadExtras(cid);
+          loadReceipts(cid, 0);
+        }
+      },
+    });
+    convSubs.set(cid, sup);
+    sup.start();
+  };
+
+  const convHandlers = (cid: string): Parameters<ChatApi['subscribeConversation']>[1] => ({
       onReaction: (r) => {
         const ex = extrasOf(cid);
         const rest = ex.reactions.filter((x) => x.id !== r.id && reactionKey(x) !== reactionKey(r));
@@ -578,13 +643,145 @@ export const useChat = create<ChatState>((set, get) => {
         }
         loadReceipts(cid);
       },
-    });
-    convSubs.set(cid, unsub);
-  };
+  });
 
   const unsubscribeOpen = (cid: string) => {
-    convSubs.get(cid)?.();
+    convSubs.get(cid)?.stop();
     convSubs.delete(cid);
+    extrasAt.delete(cid); // closed = not listening: extras may change meanwhile, so the next open reloads them
+  };
+
+  // ── Reliability patch: incremental, single-flight sync ─────────────────
+  /** The newest message the server confirmed in this chat (its server time), and the ids we hold. */
+  const confirmedOf = (cid: string) => (get().messages[cid] ?? []).filter((m) => !m.status);
+
+  /** Full load: the newest 60 (keeps bubbles still sending). */
+  const loadFull = async (cid: string) => {
+    chatSyncStats.full++;
+    const using = api;
+    const uid = get().uid;
+    const rows = await using.fetchMessages(cid);
+    if (api !== using || get().uid !== uid) return;
+    const pending = (get().messages[cid] ?? []).filter((m) => m.status);
+    const confirmed = rows.map(toMsg);
+    const merged = [...confirmed, ...pending.filter((p) => !confirmed.some((r) => r.clientId && r.clientId === p.clientId))];
+    set({ messages: { ...get().messages, [cid]: merged } });
+    fullAt.set(cid, Date.now());
+    const newest = rows[rows.length - 1]?.created_at;
+    if (newest) syncedTo.set(cid, newest);
+    void ensurePeople(confirmed.map((m) => m.senderId));
+  };
+
+  /** Only what changed since the newest message we have: newer messages, and unsent / opened ones among ours. */
+  const loadNewer = async (cid: string) => {
+    const have = confirmedOf(cid);
+    const since = syncedTo.get(cid) ?? have[have.length - 1]?.createdAt;
+    if (!since) return loadFull(cid);
+    chatSyncStats.incremental++;
+    const using = api;
+    const uid = get().uid;
+    // A little overlap: a message stamped just before `since` but committed after it is still caught (ids dedupe).
+    const overlap = new Date(Date.parse(since) - CHAT_SYNC.overlapMs).toISOString();
+    const res = await using.fetchMessagesSince(cid, overlap, have.map((m) => m.id));
+    if (api !== using || get().uid !== uid) return;
+    if (res.full) return loadFull(cid); // a big gap: just take the newest 60
+    for (const r of res.rows) upsertMessage(toMsg(r));
+    const newest = res.rows[res.rows.length - 1]?.created_at;
+    if (newest && newest > since) syncedTo.set(cid, newest);
+    for (const id of res.gone) removeMessage(cid, id);
+    if (res.rows.length) void ensurePeople(res.rows.map((r) => r.sender_id));
+  };
+
+  /** Bring one chat's messages up to date (one sync per chat at a time; a second request waits for it). */
+  const syncMessages = (cid: string, opts?: { full?: boolean }): Promise<void> => {
+    const running = msgSync.get(cid);
+    if (running) {
+      // The running fetch may predate what this caller needs (e.g. a reconnect): one more run after it.
+      msgAgain.add(cid);
+      return running.then(() => msgSync.get(cid) ?? undefined);
+    }
+    const cached = (get().messages[cid] ?? []).some((m) => !m.status);
+    const full = opts?.full || !cached || Date.now() - (fullAt.get(cid) ?? 0) > CHAT_SYNC.fullStaleMs;
+    const uid = get().uid;
+    const p: Promise<void> = (full ? loadFull(cid) : loadNewer(cid))
+      .then(() => {
+        void hydrateMedia(cid);
+      })
+      .finally(() => {
+        if (msgSync.get(cid) !== p) return;
+        msgSync.delete(cid);
+        if (msgAgain.delete(cid) && get().uid === uid) void syncMessages(cid);
+      });
+    msgSync.set(cid, p);
+    return p;
+  };
+
+  /**
+   * Catch up after a wake or a reconnect: the inbox list (one RPC) and the open
+   * chat's new messages + receipts. Single-flight: a second request while one
+   * runs → exactly one more run after it, never two in parallel.
+   */
+  const catchUp = singleFlight(async () => {
+    const uid = get().uid;
+    if (!uid) return;
+    await get().loadConversations();
+    const active = get().activeId;
+    if (active && get().uid === uid) {
+      loadReceipts(active, 0);
+      await syncMessages(active).catch((e) => trace('catch-up failed', String(e)));
+      markSeen(active);
+    }
+    void resumePending();
+  });
+
+  /** Messages that failed on the network: send again now (oldest first, one at a time, bounded). */
+  const resumePending = singleFlight(async () => {
+    const uid = get().uid;
+    if (!uid) return;
+    const waiting = Object.values(get().messages)
+      .flat()
+      .filter((m) => m.senderId === uid && m.clientId && m.status === 'failed' && m.failKind === 'offline' && !inflight.has(m.clientId) && (autoResumes.get(m.clientId) ?? 0) < CHAT_SYNC.maxAutoResumes)
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+    for (const m of waiting) {
+      if (get().uid !== uid) return;
+      autoResumes.set(m.clientId!, (autoResumes.get(m.clientId!) ?? 0) + 1);
+      await get().retry(m.conversationId, m.clientId!);
+    }
+  });
+
+  /** One delivery per message at a time; a network failure is tried once more quietly before it shows as failed. */
+  const deliverOnce = (conversationId: string, msg: ChatMsg): Promise<void> => {
+    const key = msg.clientId!;
+    const running = inflight.get(key);
+    if (running) return running;
+    const uid = get().uid;
+    const p = (async () => {
+      try {
+        await deliver(conversationId, msg);
+      } catch (e) {
+        if (sendFailKind(e) !== 'offline' || !uid || get().uid !== uid) throw e;
+        trace('send: network, quick retry');
+        await new Promise((r) => setTimeout(r, CHAT_SYNC.quickRetryMs));
+        if (get().uid !== uid) throw e; // signed out / switched meanwhile: never send as someone else
+        await deliver(conversationId, msg); // same clientId: the server returns the same row if the first one landed
+      }
+    })().finally(() => {
+      if (inflight.get(key) === p) inflight.delete(key);
+    });
+    inflight.set(key, p);
+    return p;
+  };
+
+  /** Reliability patch: a `conversations` UPDATE only matters if it's not just "a new message arrived". */
+  const onConversation = (row: ConversationChange | null) => {
+    if (row?.kind === 'vibe') return; // After Dark tracks its own Vibes (never listed in Messages)
+    const c = row?.id ? get().conversations[row.id] : undefined;
+    if (!row || !c) return reloadSoon(); // unknown payload, or a conversation we don't have yet
+    const renamed = row.title !== undefined && (row.title ?? undefined) !== c.title;
+    const rephoto = row.avatar_url !== undefined && api.avatarUrl(row.avatar_url) !== c.avatar;
+    if (renamed || rephoto) reloadSoon();
+    // Otherwise it's the message bump (updated_at / last_message_id): the message
+    // INSERT already updated the preview and unread count — no inbox reload.
   };
 
   /** Forget a conversation I'm no longer in (left, removed, deleted). */
@@ -642,52 +839,77 @@ export const useChat = create<ChatState>((set, get) => {
     ...EMPTY,
 
     start: async (uid, which = realChatApi) => {
-      if (get().uid === uid && unsubscribe && api === which) return;
+      if (get().uid === uid && inbox && api === which) return;
       get().stop();
       api = which;
       trace('start', { uid, demo: which.demo });
       set({ uid, demo: which.demo, live: which.demo ? 'live' : 'connecting' });
-      unsubscribe = api.subscribeInbox(uid, {
-        onMessage: onRealtime,
-        onMessageUpdate,
-        onConversation: reloadSoon,
-        onMembers: (change) => {
-          // Phase 8: someone reading (a cursor-only change) doesn't reload my
-          // whole chat list. My own cursor moving while I'm not in that chat
-          // (another device read it) does: my unread count changed.
-          const r = change.row;
-          const changed = membershipChanged(undefined, change);
-          if (changed) return reloadSoon();
-          if (r?.user_id === uid && r.conversation_id && r.conversation_id !== get().activeId) reloadSoon();
-        },
+      const liveOf = (s: SupervisedStatus): ChatState['live'] => (s === 'live' ? 'live' : s === 'connecting' ? 'connecting' : s === 'off' ? 'off' : 'error');
+      inbox = new ChannelSupervisor({
+        name: 'inbox',
+        open: (onStatus) =>
+          api.subscribeInbox(uid, {
+            onMessage: onRealtime,
+            onMessageUpdate,
+            onConversation,
+            onMembers: (change) => {
+              // Phase 8: someone reading (a cursor-only change) doesn't reload my
+              // whole chat list. My own cursor moving while I'm not in that chat
+              // (another device read it) does: my unread count changed.
+              const r = change.row;
+              // Reliability patch: in a 1:1 we already know the other person's status, so their
+              // cursor moving (every message they send moves it) is never a membership change.
+              const c = r?.conversation_id ? get().conversations[r.conversation_id] : undefined;
+              if (change.event === 'UPDATE' && r?.user_id && r.user_id !== uid && c?.kind === 'direct' && c.otherId === r.user_id && r.status === c.otherStatus) {
+                memberSig.set(`${r.conversation_id}|${r.user_id}`, sigOf(r));
+                return;
+              }
+              // My own row: only a READ cursor that moved without this phone (another device) changes my
+              // unread count. My delivered cursor moves after every incoming message (this phone acks it) —
+              // that alone never reloads the list.
+              if (change.event === 'UPDATE' && r?.user_id === uid && r.conversation_id && c && r.status === c.myStatus) {
+                const prev = myReadAt.get(r.conversation_id);
+                const read = r.last_read_at ?? '';
+                myReadAt.set(r.conversation_id, read);
+                memberSig.set(`${r.conversation_id}|${r.user_id}`, sigOf(r));
+                // Only matters while we show unread here: the read cursor moved (seen before), or it
+                // already covers the newest message (first sight) — i.e. it was read on another device.
+                const elsewhere = c.unread > 0 && (prev !== undefined ? prev !== read : !!c.lastAt && serverMicros(read) >= serverMicros(c.lastAt));
+                if (elsewhere && r.conversation_id !== get().activeId) reloadSoon();
+                return;
+              }
+              const changed = membershipChanged(undefined, change);
+              if (changed) return reloadSoon();
+              if (r?.user_id === uid && r.conversation_id && r.conversation_id !== get().activeId) reloadSoon();
+            },
+            onStatus,
+          }),
         onStatus: (s) => {
           trace('channel', s);
-          if (get().uid !== uid) return;
-          set({ live: s === 'SUBSCRIBED' ? 'live' : s === 'CHANNEL_ERROR' || s === 'TIMED_OUT' ? 'error' : get().live });
-          // (Re)connected: catch up on anything missed while offline — the list,
-          // and the open chat (its messages, Seen and receipts).
-          if (s === 'SUBSCRIBED') {
-            void get().loadConversations();
-            const active = get().activeId;
-            if (active) void get().open(active);
-          }
+          if (get().uid === uid) set({ live: which.demo ? 'live' : liveOf(s) });
+        },
+        // (Re)connected: catch up once on anything missed — the list, and the open
+        // chat's new messages, Seen and receipts; then resend what failed offline.
+        onLive: () => {
+          if (get().uid === uid) void catchUp();
         },
       });
-      // Coming back to the app: catch up once (Realtime may have been paused in the background). No polling.
-      appStateSub = AppState.addEventListener('change', (state) => {
-        if (state !== 'active' || get().uid !== uid) return;
-        void get().loadConversations();
-        const active = get().activeId;
-        if (active) void get().open(active);
+      inbox.start();
+      // Back from the background / the network is back: one shared wake (no AppState listener of our own).
+      wakeSub = onWake(() => {
+        if (get().uid !== uid) return;
+        inbox?.wake();
+        for (const sup of convSubs.values()) sup.wake();
+        void catchUp();
       });
       await get().loadConversations();
     },
 
     stop: () => {
-      unsubscribe?.();
-      unsubscribe = null;
-      appStateSub?.remove();
-      appStateSub = null;
+      inbox?.stop();
+      inbox = null;
+      wakeSub?.();
+      wakeSub = null;
       for (const cid of [...convSubs.keys()]) unsubscribeOpen(cid);
       if (reloadTimer) clearTimeout(reloadTimer);
       reloadTimer = null;
@@ -701,6 +923,14 @@ export const useChat = create<ChatState>((set, get) => {
       memberSig.clear();
       flashed.clear();
       dismissedMatches.clear();
+      fullAt.clear();
+      syncedTo.clear();
+      myReadAt.clear();
+      extrasAt.clear();
+      msgSync.clear();
+      msgAgain.clear();
+      inflight.clear();
+      autoResumes.clear();
       if (get().uid) trace('stop');
       api = realChatApi;
       set({ ...EMPTY });
@@ -710,6 +940,7 @@ export const useChat = create<ChatState>((set, get) => {
       const uid = get().uid;
       if (!uid) return;
       const using = api;
+      chatSyncStats.inboxLoads++;
       try {
         const rows = await using.fetchConversations();
         if (get().uid !== uid || api !== using) return;
@@ -745,17 +976,12 @@ export const useChat = create<ChatState>((set, get) => {
       // Phase 9.1: receipts load alongside the messages (was: after them — one extra round trip
       // before the status line settled).
       loadReceipts(conversationId, 0);
-      void get().loadExtras(conversationId);
+      // Reliability patch: extras only when not loaded yet or getting old (live changes arrive on the channel).
+      if (!get().extras[conversationId]?.loaded || Date.now() - (extrasAt.get(conversationId) ?? 0) > CHAT_SYNC.extrasStaleMs) void get().loadExtras(conversationId);
       try {
-        const rows = await api.fetchMessages(conversationId);
-        if (get().activeId !== conversationId && get().messages[conversationId]) return;
-        // Keep optimistic bubbles that haven't been confirmed yet.
-        const pending = (get().messages[conversationId] ?? []).filter((m) => m.status);
-        const confirmed = rows.map(toMsg);
-        const merged = [...confirmed, ...pending.filter((p) => !confirmed.some((r) => r.clientId && r.clientId === p.clientId))];
-        set({ messages: { ...get().messages, [conversationId]: merged } });
-        void hydrateMedia(conversationId);
-        void ensurePeople(confirmed.map((m) => m.senderId));
+        // What's cached shows at once; only what's new is fetched (a full load when there's nothing or it's old).
+        await syncMessages(conversationId);
+        if (get().activeId !== conversationId) return;
         // Phase 8: Seen only if I'm actually looking (foreground), up to what's on screen.
         markSeen(conversationId);
       } catch (e) {
@@ -774,9 +1000,12 @@ export const useChat = create<ChatState>((set, get) => {
     },
 
     loadExtras: async (cid) => {
+      chatSyncStats.extras++;
+      const started = Date.now();
       try {
         const [, , sameBrain] = await Promise.all([refresh.members(cid), refresh.reactions(cid), refresh.sameBrain(cid), refresh.loops(cid), refresh.pings(cid)]);
         for (const e of sameBrain) maybeFlash(e); // only one that is happening right now plays; older ones are marked played
+        if (convSubs.has(cid)) extrasAt.set(cid, started); // fresh only while its channel is listening
         setExtras(cid, { loaded: true });
       } catch (e) {
         trace('extras failed', String(e));
@@ -813,7 +1042,7 @@ export const useChat = create<ChatState>((set, get) => {
       logEvent('message_sent', { targetType: 'message', context: { kind: msg.type, view_once: !!msg.viewOnce } });
       bumpSummary(msg, false);
       try {
-        await deliver(conversationId, msg);
+        await deliverOnce(conversationId, msg);
       } catch (e) {
         trace('send failed', String(e));
         set({ messages: { ...get().messages, [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.clientId === msg.clientId ? { ...m, status: 'failed', failKind: sendFailKind(e) } : m)) } });
@@ -831,10 +1060,10 @@ export const useChat = create<ChatState>((set, get) => {
 
     retry: async (conversationId, clientId) => {
       const msg = (get().messages[conversationId] ?? []).find((m) => m.clientId === clientId);
-      if (!msg || msg.status !== 'failed') return;
+      if (!msg || msg.status !== 'failed' || inflight.has(clientId)) return;
       set({ messages: { ...get().messages, [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.clientId === clientId ? { ...m, status: 'sending', failKind: undefined } : m)) } });
       try {
-        await deliver(conversationId, msg); // same clientId → never duplicated
+        await deliverOnce(conversationId, msg); // same clientId → never duplicated
       } catch (e) {
         trace('retry failed', String(e));
         set({ messages: { ...get().messages, [conversationId]: (get().messages[conversationId] ?? []).map((m) => (m.clientId === clientId ? { ...m, status: 'failed', failKind: sendFailKind(e) } : m)) } });

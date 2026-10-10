@@ -12,6 +12,8 @@ export interface ChatApi {
   demo: boolean;
   fetchConversations: typeof chat.fetchConversations;
   fetchMessages: typeof chat.fetchMessages;
+  /** Reliability patch: only what changed since the newest message we have. */
+  fetchMessagesSince: typeof chat.fetchMessagesSince;
   sendMessage: typeof chat.sendMessage;
   markRead: typeof chat.markRead;
   /** Phase 8 (0011): Seen up to a message, Delivered after a sync, and the receipts to show. */

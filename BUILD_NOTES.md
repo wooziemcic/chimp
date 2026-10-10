@@ -105,6 +105,53 @@ There is no SQL, no schema change and no new package in this section.
 - "Seen by" placement over a playing Story.
 - The viewer sheet over the Story with the home indicator.
 - A view being recorded only once the frame shows on a slow network.
+## Reliability / cost patch: chat delivery, Realtime reconnects, fresh like counts
+
+There is no SQL, no schema change and no new package in this section. `@react-native-community/netinfo` was already a dependency.
+
+**Why messages stalled on a phone**
+- After iOS suspends the app, or Wi-Fi ↔ cellular changes, the Realtime socket can look open while nothing gets through.
+- supabase-js only notices at its next heartbeat timeout, which takes up to ~50 s. Until then, new messages, Delivered / Seen and likes don't arrive.
+- A send on a dead connection could wait for the system timeout (a minute or more). A failed send then waited for a tap.
+- Switching networks or relaunching "fixed" it because that forced a new connection.
+
+**What changed**
+- **One wake** (`services/realtimeHealth.ts`), from one AppState listener and one NetInfo listener:
+  - The live layer and the chat store no longer run their own resume catch-ups.
+  - A wake checks the socket with a heartbeat. If nothing answers within 3.5 s, supabase-js reconnects at once, and channels rejoin by themselves.
+- **Channel supervisor:**
+  - One channel per purpose, and the old channel is removed before a replacement exists.
+  - After an error, supabase-js rejoins the same channel; it is no longer replaced every 8 s.
+  - After 5 failures in a row the channel is parked until the next wake.
+  - A server-side close re-subscribes with backoff (2 s → 2 min), then parks.
+  - The relationships fallback re-read runs once after 3 s, then backs off (30 s → 4 min) and stops; it no longer runs every 20 s forever.
+- **Chat:**
+  - Catch-up is single-flight and incremental: only messages newer than the last fetch, plus which of ours were unsent.
+  - Reopening a chat shows its cached messages at once. Its extras (members, reactions, loops, Pings) re-read only after 5 min.
+  - Sends time out after 12 s and retry once quietly (same clientId, never a duplicate). A send that still fails resumes by itself when the app or network is back, at most 3 times.
+  - A new message no longer reloads the inbox: the message itself updates the preview. Neither the `conversations` bump nor your own Delivered cursor reloads it. A read on another device still reloads it when unread messages are showing.
+  - A channel parked after repeated failures also retries by itself after 3 and 10 minutes while the app stays open. A flapping network gets at most one catch-up every 20 s, plus one when it settles.
+- **REST calls:** database / RPC / auth calls give up after 20 s and count as network errors; supabase-js doesn't silently repeat them. Uploads and Edge Functions are unchanged.
+- **Feed** (`services/postSync.ts`):
+  - A like refreshes that post's count (1 RPC, batched).
+  - A comment or reply refreshes that Buzz's comments.
+  - A World post fetches that post.
+  - Opening a post, for example from a notification, refreshes its count and comments at once, and fetches it if it isn't loaded.
+  - Joins still use the world reload, now throttled to 5 min.
+
+**Request census** (web build + mock, same script on `add3786` and this patch; simulated, not an iPhone)
+
+| Scenario | add3786 | Patch |
+|---|---|---|
+| Realtime events channel failing, idle 2 min | 56 requests (28/min) + 45 channel joins | 8 requests (one re-read) + 3 joins, then parked |
+| One like event | 24 requests (full world reload) | 1 |
+| Open the liked post (likes arrived while asleep) | 0 requests, count stale (3 of 5) | 2 requests, count current (5) |
+| One incoming message, inbox open | 2 | 1 |
+| One incoming message, that chat open | 5 | 3 |
+| Send with one network drop | failed, needs a tap (0 rows sent) | sent once (1 row) |
+| Message sent 2 s after resume over a dead socket | arrived after 29.5 s | 4.6 s |
+| Offline send, then back online | stays failed | sends by itself, once |
+| Cold start / resume / idle with healthy Realtime | 38–41 / 9 / 0 | 38–41 / 9 / 0 (unchanged) |
 
 ## Phase 9.2 polish (no schema change, no SQL, no new package)
 

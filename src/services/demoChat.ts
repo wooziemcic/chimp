@@ -179,6 +179,10 @@ export const demoChatApi: ChatApi = {
         };
       }),
   fetchMessages: async (cid) => d().messages.filter((m) => m.conversation_id === cid && !m.deleted_at),
+  fetchMessagesSince: async (cid, since, knownIds) => {
+    const all = d().messages.filter((m) => m.conversation_id === cid);
+    return { rows: all.filter((m) => !m.deleted_at && m.created_at > since), gone: all.filter((m) => m.deleted_at && knownIds.includes(m.id)).map((m) => m.id), full: false };
+  },
   sendMessage: async (uid, cid, clientId, body, media, replyTo, extra) => {
     if (!isMember(cid)) deny('You’re not in this chat.');
     const dup = d().messages.find((m) => m.conversation_id === cid && m.client_id === clientId);
